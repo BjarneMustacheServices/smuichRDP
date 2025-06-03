@@ -1,6 +1,11 @@
 name: Windows - AnyDesk Remote Access
 on:
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
+        required: false
+        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
   remote_access:
@@ -91,15 +96,56 @@ jobs:
               echo "anydesk_password=EXECUTABLE_NOT_FOUND" >> $GITHUB_OUTPUT
           } else {
               Write-Host "Versuche, das AnyDesk-Passwort festzulegen..."
-              # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
-              # Das `echo` pipe-t das Passwort an den anydesk.exe Befehl.
-              echo $randomPassword | & $anyDeskExePath --set-password
-              if ($LASTEXITCODE -eq 0) {
-                  Write-Host "AnyDesk Passwort erfolgreich festgelegt."
-                  echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
+              
+              # Überprüfen, ob der AnyDesk-Dienst läuft, und starten Sie ihn bei Bedarf
+              $serviceStatus = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+              if ($serviceStatus -and $serviceStatus.Status -eq "Running") {
+                  Write-Host "AnyDesk-Dienst läuft. Versuche, das Passwort festzulegen..."
               } else {
-                  Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $LASTEXITCODE. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
-                  echo "anydesk_password=PASSWORD_SET_FAILED" >> $GITHUB_OUTPUT
+                  Write-Warning "AnyDesk-Dienst läuft nicht. Versuche, ihn zu starten..."
+                  try {
+                      Start-Service -Name "AnyDesk" -ErrorAction Stop
+                      Write-Host "AnyDesk-Dienst erfolgreich gestartet."
+                      Start-Sleep -Seconds 5 # Geben Sie dem Dienst einen Moment, um sich zu stabilisieren
+                  } catch {
+                      Write-Error "Fehler beim Starten des AnyDesk-Dienstes: $($_.Exception.Message). Passwort kann nicht festgelegt werden."
+                      echo "anydesk_password=SERVICE_START_FAILED" >> $GITHUB_OUTPUT
+                      # Beenden Sie diesen Block, da das Festlegen des Passworts nicht funktioniert
+                      return
+                  }
+              }
+
+              # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
+              # Verwende Start-Process mit RedirectStandardInput für robustere Eingabe.
+              try {
+                  $process = Start-Process -FilePath $anyDeskExePath -ArgumentList "--set-password" -PassThru -NoNewWindow -RedirectStandardInput -RedirectStandardOutput -RedirectStandardError
+                  $process.StandardInput.WriteLine($randomPassword)
+                  $process.StandardInput.Close()
+                  $process.WaitForExit(30000) # Warte bis zu 30 Sekunden, bis der Prozess beendet ist
+
+                  if ($process.HasExited) {
+                      $exitCode = $process.ExitCode
+                      $output = $process.StandardOutput.ReadToEnd()
+                      $errorOutput = $process.StandardError.ReadToEnd()
+
+                      Write-Host "AnyDesk --set-password Exit Code: $exitCode"
+                      if ($output) { Write-Host "AnyDesk --set-password Output: $output" }
+                      if ($errorOutput) { Write-Error "AnyDesk --set-password Error: $errorOutput" }
+
+                      if ($exitCode -eq 0) {
+                          Write-Host "AnyDesk Passwort erfolgreich festgelegt."
+                          echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
+                      } else {
+                          Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $exitCode. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
+                          echo "anydesk_password=PASSWORD_SET_FAILED_WITH_CODE_$exitCode" >> $GITHUB_OUTPUT
+                      }
+                  } else {
+                      Write-Error "FEHLER: AnyDesk Prozess zum Festlegen des Passworts hat nicht innerhalb der erwarteten Zeit beendet."
+                      echo "anydesk_password=PASSWORD_SET_TIMEOUT" >> $GITHUB_OUTPUT
+                  }
+              } catch {
+                  Write-Error "Fehler beim Ausführen von AnyDesk --set-password: $($_.Exception.Message)"
+                  echo "anydesk_password=PASSWORD_SET_EXCEPTION" >> $GITHUB_OUTPUT
               }
           }
 
