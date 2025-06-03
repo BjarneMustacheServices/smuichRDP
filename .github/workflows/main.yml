@@ -9,49 +9,61 @@ jobs:
 
     steps:
       - name: RustDesk herunterladen
-        id: download_rustdesk_step # Hinzugefügte ID für diesen Schritt
+        id: download_rustdesk_step
         run: |
           Write-Host "Starte RustDesk-Einrichtung..."
           Write-Host "Lade RustDesk-Anwendung von der angegebenen URL herunter..."
-          # Verwende die spezifische URL, die vom Benutzer bereitgestellt wurde.
+          
           $rustDeskDownloadUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.exe"
-          $downloadPath = "$env:TEMP\rustdesk-portable.exe" # Speichere es als portable.exe
+          $downloadPath = "$env:TEMP\rustdesk-portable.exe"
 
           try {
               Invoke-WebRequest -Uri $rustDeskDownloadUrl -OutFile $downloadPath -ErrorAction Stop
               Write-Host "RustDesk-Anwendung erfolgreich heruntergeladen nach $downloadPath"
           } catch {
               Write-Error "Fehler beim Herunterladen der RustDesk-Anwendung von '$rustDeskDownloadUrl': $($_.Exception.Message)"
+              # Setze Output auch bei Fehler
+              "rustdesk_exe_path=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              "download_success=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
               exit 1
           }
 
           # Stelle sicher, dass die heruntergeladene Datei existiert
           if (-not (Test-Path $downloadPath)) {
               Write-Error "FEHLER: Heruntergeladene RustDesk-Anwendung nicht gefunden unter $downloadPath."
-              echo "rustdesk_id=DOWNLOAD_FAILED_NO_EXE" >> $GITHUB_OUTPUT
+              "rustdesk_exe_path=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              "download_success=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
               exit 1
           }
+          
           Write-Host "Heruntergeladene RustDesk-Anwendung verifiziert."
-          echo "rustdesk_exe_path=$downloadPath" >> $GITHUB_OUTPUT # Speichere den Pfad für spätere Schritte
+          # Verwende die korrekte Syntax für GitHub Actions Outputs
+          "rustdesk_exe_path=$downloadPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "download_success=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: RustDesk starten und ID abrufen
+        # Führe diesen Step nur aus, wenn der Download erfolgreich war
+        if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
-          # Korrekte Referenzierung des Outputs des vorherigen Schritts
+          # Verwende eine robustere Methode, um den Pfad zu erhalten
           $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          if (-not $rustDeskExePath) {
-              Write-Error "Fehler: RustDesk-Anwendungspfad nicht verfügbar. Job wird beendet."
+          
+          # Zusätzliche Validierung
+          if ([string]::IsNullOrEmpty($rustDeskExePath) -or -not (Test-Path $rustDeskExePath)) {
+              Write-Error "Fehler: RustDesk-Anwendungspfad '$rustDeskExePath' nicht verfügbar oder Datei existiert nicht."
+              "rustdesk_id=DOWNLOAD_FAILED_NO_EXE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
               exit 1
           }
 
           Write-Host "--- Starte RustDesk-Anwendung direkt und versuche ID abzurufen ---"
+          Write-Host "Verwende RustDesk-Pfad: $rustDeskExePath"
 
-          # Starte RustDesk im Hintergrund, ohne Installation und ohne GUI anzuzeigen.
-          # Der --no-daemon Parameter verhindert, dass es sich als Dienst installiert.
+          # Starte RustDesk im Hintergrund
           Write-Host "Starte RustDesk-Anwendung im Hintergrund: '$rustDeskExePath --no-daemon'..."
           try {
-              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              Write-Host "RustDesk-Hintergrundprozess gestartet. Warte 20 Sekunden, damit die ID generiert wird..."
-              Start-Sleep -Seconds 20 # Genug Zeit geben, damit die ID generiert wird
+              $process = Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction Stop
+              Write-Host "RustDesk-Hintergrundprozess gestartet (PID: $($process.Id)). Warte 20 Sekunden, damit die ID generiert wird..."
+              Start-Sleep -Seconds 20
               Write-Host "Wartezeit für ID-Generierung beendet."
           } catch {
               Write-Warning "Konnte RustDesk-Hintergrundprozess nicht starten: $($_.Exception.Message). Versuche trotzdem ID abzurufen."
@@ -61,25 +73,37 @@ jobs:
           $rustDeskId = $null
           Write-Host "Versuche, RustDesk ID mit '$rustDeskExePath --get-id' abzurufen..."
           try {
-              $idProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList "--get-id" -PassThru -NoNewWindow -RedirectStandardOutput -RedirectStandardError
-              $idProcess.WaitForExit(15000) # Warte bis zu 15 Sekunden auf die ID-Abfrage
+              $psi = New-Object System.Diagnostics.ProcessStartInfo
+              $psi.FileName = $rustDeskExePath
+              $psi.Arguments = "--get-id"
+              $psi.RedirectStandardOutput = $true
+              $psi.RedirectStandardError = $true
+              $psi.UseShellExecute = $false
+              $psi.CreateNoWindow = $true
 
-              if ($idProcess.HasExited) {
+              $idProcess = New-Object System.Diagnostics.Process
+              $idProcess.StartInfo = $psi
+              $idProcess.Start() | Out-Null
+              
+              $timeout = $idProcess.WaitForExit(15000) # 15 Sekunden Timeout
+              
+              if ($timeout) {
                   $idOutput = $idProcess.StandardOutput.ReadToEnd().Trim()
                   $idError = $idProcess.StandardError.ReadToEnd().Trim()
                   Write-Host "Befehl '$rustDeskExePath --get-id' beendet mit Exit Code: $($idProcess.ExitCode)"
-                  Write-Host "Standard-Ausgabe (STDOUT): '$idOutput'" # Zeigt die genaue Ausgabe
-                  if ($idError) { Write-Error "Standard-Fehler (STDERR): '$idError'" }
+                  Write-Host "Standard-Ausgabe (STDOUT): '$idOutput'"
+                  if ($idError) { Write-Host "Standard-Fehler (STDERR): '$idError'" }
 
                   # Suche nach einer 9-stelligen ID in der Ausgabe
                   if ($idOutput -match "(\d{9})") {
                       $rustDeskId = $Matches[1]
                       Write-Host "RustDesk ID erfolgreich über --get-id gefunden: $rustDeskId"
                   } else {
-                      Write-Warning "Keine 9-stellige ID in der --get-id-Ausgabe gefunden. Ausgabe war: '$idOutput'. Versuche als Nächstes, aus der Konfigurationsdatei zu lesen."
+                      Write-Warning "Keine 9-stellige ID in der --get-id-Ausgabe gefunden. Ausgabe war: '$idOutput'"
                   }
               } else {
                   Write-Error "RustDesk --get-id-Prozess hat nach 15 Sekunden ein Timeout."
+                  $idProcess.Kill()
               }
           } catch {
               Write-Error "Fehler beim Ausführen von RustDesk --get-id: $($_.Exception.Message)"
@@ -88,10 +112,8 @@ jobs:
           # Fallback: Versuche, die ID aus der Konfigurationsdatei zu lesen
           if (-not $rustDeskId) {
               Write-Host "--- RustDesk ID nicht über --get-id gefunden. Versuche, aus Konfigurationsdateien zu lesen ---"
-              # Für eine nicht-installierte Version ist die Konfigurationsdatei typischerweise im APPDATA-Pfad des Benutzers.
               $rustDeskConfigPaths = @(
                   (Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml"),
-                  # Fügen Sie den ProgramData-Pfad als sekundären Fallback hinzu, falls es doch eine Systeminstallation ist
                   (Join-Path -Path "$env:ProgramData" -ChildPath "RustDesk\config\RustDesk.toml")
               )
 
@@ -99,44 +121,44 @@ jobs:
                   if (Test-Path $configPath) {
                       Write-Host "Prüfe Konfigurationsdatei: $configPath"
                       try {
-                          $configContent = Get-Content -Path $configPath | Out-String
-                          if ($configContent -match "client_id\s*=\s*(\d{9})") {
+                          $configContent = Get-Content -Path $configPath -Raw
+                          if ($configContent -match "client_id\s*=\s*[`"']?(\d{9})[`"']?") {
                               $rustDeskId = $Matches[1]
                               Write-Host "RustDesk ID in Konfigurationsdatei gefunden: $configPath - ID: $rustDeskId"
-                              break # Schleife beenden, sobald ID gefunden wurde
+                              break
                           } else {
                               Write-Warning "RustDesk ID (client_id = 9 Ziffern) nicht in Konfigurationsdatei gefunden: $configPath"
                           }
                       } catch {
-                          Write-Error ("Fehler beim Lesen der Konfigurationsdatei " + $configPath + ": " + $($_.Exception.Message))
+                          Write-Error "Fehler beim Lesen der Konfigurationsdatei $configPath : $($_.Exception.Message)"
                       }
                   } else {
-                      Write-Warning "RustDesk-Konfigurationsdatei nicht gefunden unter $configPath."
+                      Write-Warning "RustDesk-Konfigurationsdatei nicht gefunden unter $configPath"
                   }
               }
           }
+
           Write-Host "--- Versuch, RustDesk ID abzurufen, beendet ---"
 
           # Ausgabe der RustDesk ID an den GitHub Actions Workflow Output
           if ($rustDeskId) {
               Write-Host "RustDesk ID erfolgreich abgerufen: $rustDeskId"
-              echo "rustdesk_id=$rustDeskId" >> $GITHUB_OUTPUT
+              "rustdesk_id=$rustDeskId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-              Write-Error "FEHLER: RustDesk ID konnte nach mehreren Versuchen nicht abgerufen werden. Fernverbindung ist möglicherweise nicht möglich."
-              echo "rustdesk_id=NOT_AVAILABLE" >> $GITHUB_OUTPUT
+              Write-Error "FEHLER: RustDesk ID konnte nach mehreren Versuchen nicht abgerufen werden."
+              "rustdesk_id=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
-          # Schritt 3: Alle RustDesk-Prozesse beenden, um den Runner sauber zu halten
+          # Alle RustDesk-Prozesse beenden
           Write-Host "Beende alle laufenden RustDesk-Prozesse..."
           Get-Process -Name "rustdesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5 # Kurz warten, damit die Prozesse beendet werden
+          Start-Sleep -Seconds 5
           Write-Host "Alle RustDesk-Prozesse beendet."
 
       - name: Runner aktiv halten
+        # Führe diesen Step nur aus, wenn die ID erfolgreich abgerufen wurde
+        if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
-          # Dieser Schritt hält den GitHub Actions Runner für eine angegebene Dauer aktiv.
-          # Dies ist notwendig, damit Sie Zeit haben, sich über RustDesk zu verbinden.
-          # Die maximale Job-Dauer für GitHub Actions beträgt 360 Minuten (6 Stunden).
           $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
           if ($durationMinutes -gt 360) {
               $durationMinutes = 360
@@ -144,5 +166,5 @@ jobs:
           }
           $durationSeconds = $durationMinutes * 60
           Write-Host "Halte den Runner für $durationMinutes Minuten ($durationSeconds Sekunden) aktiv..."
+          Write-Host "RustDesk ID: ${{ steps.download_rustdesk_step.outputs.rustdesk_id }}"
           Start-Sleep -Seconds $durationSeconds
-        shell: pwsh
