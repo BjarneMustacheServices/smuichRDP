@@ -1,68 +1,191 @@
-name: Windows - RDP Remote Access
+name: Windows - RustDesk Remote Access
 on:
   workflow_dispatch:
 
 jobs:
   remote_access:
-    name: RDP für Remote-Zugriff einrichten
+    name: RustDesk für Remote-Zugriff einrichten
     runs-on: windows-latest
 
     steps:
-      - name: RDP aktivieren und Benutzer einrichten
+      - name: Runner vorbereiten und RustDesk installieren
         run: |
-          Write-Host "Starte die RDP-Einrichtung..."
+          # Step 1: Download RustDesk installer
+          Write-Host "Starting RustDesk setup..."
+          Write-Host "Downloading RustDesk installer from official sources..."
+          # Fetch the latest stable release URL from GitHub API
+          $rustDeskDownloadUrl = (Invoke-RestMethod -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest").assets | Where-Object {$_.name -like "rustdesk-*-x86_64.exe"} | Select-Object -ExpandProperty browser_download_url | Select-Object -First 1
 
-          # Schritt 1: Remote Desktop aktivieren
-          Write-Host "Aktiviere Remote Desktop..."
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
-          Write-Host "Remote Desktop aktiviert."
-
-          # Schritt 2: Firewall-Regel für RDP hinzufügen
-          Write-Host "Füge Firewall-Regel für Remote Desktop hinzu..."
-          New-NetFirewallRule -DisplayName "RemoteDesktop" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
-          Write-Host "Firewall-Regel hinzugefügt."
-
-          # Schritt 3: Neuen Benutzer für RDP erstellen
-          $username = "ghrunner"
-          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
-          $password = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
-
-          Write-Host "Erstelle neuen Benutzer '$username'..."
-          net user $username $password /add /y | Out-Null
-          Write-Host "Benutzer '$username' erstellt."
-
-          # Schritt 4: Benutzer zur Remote Desktop Users Gruppe hinzufügen
-          Write-Host "Füge Benutzer '$username' zur 'Remote Desktop Users' Gruppe hinzu..."
-          net localgroup "Remote Desktop Users" $username /add | Out-Null
-          Write-Host "Benutzer '$username' zur Remote Desktop Users Gruppe hinzugefügt."
-
-          # Schritt 5: Interne IP-Adresse des Runners abrufen
-          Write-Host "Rufe interne IP-Adresse ab..."
-          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "Ethernet*" -and $_.PrefixOrigin -eq "Dhcp"}).IPAddress
-          if (-not $ipAddress) {
-              $ipAddress = "UNKNOWN_IP"
-              Write-Warning "Konnte keine interne IP-Adresse abrufen."
+          if (-not $rustDeskDownloadUrl) {
+              Write-Error "Failed to find RustDesk download URL. Exiting."
+              exit 1
           }
-          Write-Host "Interne IP-Adresse: $ipAddress"
 
-          # Schritt 6: RDP-Verbindungsinformationen an den GitHub Actions Workflow-Output ausgeben
-          echo "rdp_username=$username" >> $GITHUB_OUTPUT
-          echo "rdp_password=$password" >> $GITHUB_OUTPUT
-          echo "rdp_internal_ip=$ipAddress" >> $GITHUB_OUTPUT
-          Write-Host "RDP-Einrichtung abgeschlossen."
+          Invoke-WebRequest -Uri $rustDeskDownloadUrl -OutFile "$env:TEMP\RustDesk.exe" -ErrorAction Stop
+          Write-Host "RustDesk installer downloaded to $env:TEMP\RustDesk.exe"
 
-      - name: Runner aktiv halten
+          # Step 2: Install RustDesk silently
+          Write-Host "Installing RustDesk silently. This may take a moment..."
+          # Use --silent-install for unattended installation.
+          $installProcess = Start-Process -FilePath "$env:TEMP\RustDesk.exe" -ArgumentList "--silent-install" -Wait -NoNewWindow -PassThru -ErrorAction Stop
+
+          if ($installProcess.ExitCode -ne 0) {
+              Write-Error "RustDesk installation failed with Exit Code: $($installProcess.ExitCode)"
+              echo "rustdesk_id=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
+              echo "rustdesk_password=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
+              exit 1 # Terminate job if installation fails
+          }
+          Write-Host "RustDesk installation completed successfully."
+
+          # Verify if RustDesk.exe exists after installation
+          $programFilesPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFiles) # RustDesk installs to Program Files, not Program Files (x86)
+          $rustDeskExePath = Join-Path -Path "$programFilesPath" -ChildPath "RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rustDeskExePath)) {
+              Write-Error "ERROR: RustDesk.exe not found after installation at $rustDeskExePath."
+              echo "rustdesk_id=INSTALLATION_FAILED_NO_EXE" >> $GITHUB_OUTPUT
+              echo "rustdesk_password=INSTALLATION_FAILED_NO_EXE" >> $GITHUB_OUTPUT
+              exit 1
+          }
+          Write-Host "RustDesk.exe found at $rustDeskExePath."
+
+          # Step 3: Wait for RustDesk service to initialize and generate ID
+          Write-Host "Waiting for RustDesk service to initialize and generate ID (approx. 30 seconds)..."
+          Start-Sleep -Seconds 30
+
+          # Step 4: Retrieve RustDesk ID
+          # RustDesk ID is typically found in %APPDATA%\RustDesk\config\RustDesk.toml for portable/user installs
+          # For installed versions, it might be in %ProgramFiles%\RustDesk\config\RustDesk.toml or a service profile.
+          # The --get-id command line parameter is the most reliable way if it works.
+          $rustDeskId = $null
+          Write-Host "Attempting to retrieve RustDesk ID using --get-id command..."
+          try {
+              # Some sources suggest --get-id only works after GUI has run once.
+              # We'll try running the GUI briefly in the background first, then try --get-id.
+              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru
+              Start-Sleep -Seconds 10 # Give it time to generate ID if it needs GUI interaction
+
+              $idProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList "--get-id" -PassThru -NoNewWindow -RedirectStandardOutput -RedirectStandardError
+              $idProcess.WaitForExit(15000) # Wait up to 15 seconds for ID retrieval
+
+              if ($idProcess.HasExited) {
+                  $idOutput = $idProcess.StandardOutput.ReadToEnd().Trim()
+                  $idError = $idProcess.StandardError.ReadToEnd().Trim()
+                  Write-Host "RustDesk --get-id Exit Code: $($idProcess.ExitCode)"
+                  if ($idOutput) { Write-Host "RustDesk --get-id Output: $idOutput" }
+                  if ($idError) { Write-Error "RustDesk --get-id Error: $idError" }
+
+                  # RustDesk --get-id outputs just the ID, sometimes with a newline.
+                  if ($idOutput -match "^\d{9}$") { # Basic validation for a 9-digit ID
+                      $rustDeskId = $idOutput
+                  } else {
+                      Write-Warning "RustDesk --get-id returned unexpected output: '$idOutput'. Trying to read from config file."
+                  }
+              } else {
+                  Write-Error "RustDesk --get-id process timed out."
+              }
+          } catch {
+              Write-Error "Error executing RustDesk --get-id: $($_.Exception.Message)"
+          }
+
+          # Fallback: Try to read ID from config file if --get-id failed or returned unexpected output
+          if (-not $rustDeskId) {
+              Write-Host "Attempting to read RustDesk ID from config file..."
+              $rustDeskConfigPath = Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml"
+              if (Test-Path $rustDeskConfigPath) {
+                  Write-Host "Reading RustDesk ID from: $rustDeskConfigPath"
+                  # The ID is typically in the [options] section, e.g., "client_id = 123456789"
+                  $configContent = Get-Content -Path $rustDeskConfigPath | Out-String
+                  if ($configContent -match "client_id\s*=\s*(\d{9})") {
+                      $rustDeskId = $Matches[1]
+                      Write-Host "RustDesk ID found in config file: $rustDeskId"
+                  } else {
+                      Write-Warning "RustDesk ID not found in config file: $rustDeskConfigPath"
+                  }
+              } else {
+                  Write-Warning "RustDesk config file not found at $rustDeskConfigPath."
+              }
+          }
+
+          # Step 5: Output RustDesk ID to GitHub Actions Workflow Output
+          if ($rustDeskId) {
+              Write-Host "RustDesk ID successfully retrieved: $rustDeskId"
+              echo "rustdesk_id=$rustDeskId" >> $GITHUB_OUTPUT
+          } else {
+              Write-Error "ERROR: RustDesk ID could not be retrieved after multiple attempts. Remote connection may not be possible."
+              echo "rustdesk_id=NOT_AVAILABLE" >> $GITHUB_OUTPUT
+          }
+
+          # Step 6: Generate and set a permanent password for unattended access
+          # IMPORTANT NOTE ON PASSWORD:
+          # For unattended access in RustDesk, you typically set a permanent password.
+          # This can be done via the RustDesk settings or command line with admin privileges.
+          # The '--password <password>' command can be used.
+          # In GitHub Actions, the runner runs as Administrator, so this should work.
+          # Be aware that the password will be visible in the workflow log if set directly this way.
+          # For more secure handling, consider using GitHub Secrets.
+          Write-Host "Generating a random password for RustDesk unattended access..."
+          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
+          $randomPassword = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
+          
+          if (-not (Test-Path $rustDeskExePath)) {
+              Write-Error "RustDesk executable not found at $rustDeskExePath. Cannot set password."
+              echo "rustdesk_password=EXECUTABLE_NOT_FOUND_FOR_PASSWORD_SET" >> $GITHUB_OUTPUT
+          } else {
+              Write-Host "Attempting to set RustDesk password..."
+              
+              # Ensure RustDesk service is running before attempting to set password
+              # RustDesk might not run as a persistent service by default after silent install.
+              # The --password command usually configures the client directly.
+              try {
+                  $passwordSetArgs = @{
+                      FilePath = $rustDeskExePath
+                      ArgumentList = "--password", $randomPassword
+                      PassThru = $true
+                      NoNewWindow = $true
+                      RedirectStandardOutput = $true
+                      RedirectStandardError = $true
+                  }
+                  $process = Start-Process @passwordSetArgs
+
+                  $process.WaitForExit(30000) # Wait up to 30 seconds for the process to finish
+
+                  if ($process.HasExited) {
+                      $exitCode = $process.ExitCode
+                      $output = $process.StandardOutput.ReadToEnd()
+                      $errorOutput = $process.StandardError.ReadToEnd()
+
+                      Write-Host "RustDesk --password Exit Code: $exitCode"
+                      if ($output) { Write-Host "RustDesk --password Output: $output" }
+                      if ($errorOutput) { Write-Error "RustDesk --password Error: $errorOutput" }
+
+                      if ($exitCode -eq 0) {
+                          Write-Host "RustDesk password successfully set."
+                          echo "rustdesk_password=$randomPassword" >> $GITHUB_OUTPUT
+                      } else {
+                          Write-Error "ERROR: RustDesk password could not be set. Exit Code: $exitCode. Unattended access may not be possible."
+                          echo "rustdesk_password=PASSWORD_SET_FAILED_WITH_CODE_$exitCode" >> $GITHUB_OUTPUT
+                      }
+                  } else {
+                      Write-Error "ERROR: RustDesk password setting process timed out."
+                      echo "rustdesk_password=PASSWORD_SET_TIMEOUT" >> $GITHUB_OUTPUT
+                  }
+              } catch {
+                  Write-Error "Error executing RustDesk --password: $($_.Exception.Message)"
+                  echo "rustdesk_password=PASSWORD_SET_EXCEPTION" >> $GITHUB_OUTPUT
+              }
+          }
+
+      - name: Keep Runner Alive
         run: |
-          # Dieser Schritt hält den GitHub Actions Runner für eine angegebene Dauer aktiv.
-          # Dies ist notwendig, damit Sie Zeit haben, sich über RDP zu verbinden (falls ein Tunnel eingerichtet wird).
-          # Die maximale Job-Dauer für GitHub Actions beträgt 360 Minuten (6 Stunden).
+          # This step keeps the GitHub Actions Runner alive for a specified duration.
+          # This is necessary to allow you time to connect via RustDesk.
+          # The maximum job duration for GitHub Actions is 360 minutes (6 hours).
           $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
           if ($durationMinutes -gt 360) {
               $durationMinutes = 360
-              Write-Warning "Dauer auf maximal 360 Minuten begrenzt."
+              Write-Warning "Duration limited to a maximum of 360 minutes."
           }
           $durationSeconds = $durationMinutes * 60
-          Write-Host "Halte den Runner für $durationMinutes Minuten ($durationSeconds Sekunden) aktiv..."
+          Write-Host "Keeping the runner alive for $durationMinutes minutes ($durationSeconds seconds)..."
           Start-Sleep -Seconds $durationSeconds
         shell: pwsh
