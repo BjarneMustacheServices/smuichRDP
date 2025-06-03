@@ -142,7 +142,7 @@ jobs:
                               Write-Warning "RustDesk ID (client_id = 9 digits) not found in config file: $configPath"
                           }
                       } catch {
-                          Write-Error "Error reading config file $configPath: $($_.Exception.Message)" # Corrected this line
+                          Write-Error "Error reading config file $configPath: ${$_.Exception.Message}" # Corrected this line
                       }
                   } else {
                       Write-Warning "RustDesk config file not found at $configPath."
@@ -223,7 +223,7 @@ jobs:
         run: |
           # This step keeps the GitHub Actions Runner alive for a specified duration.
           # This is necessary to allow you time to connect via RustDesk.
-          # The maximum job duration for GitHub Actions is 360 minutes (6 Stunden).
+          # The maximum job duration for GitHub Actions beträgt 360 Minuten (6 Stunden).
           $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
           if ($durationMinutes -gt 360) {
               $durationMinutes = 360
