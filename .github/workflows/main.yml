@@ -1,20 +1,112 @@
-name: Windows - Litemanager
-on: 
+name: Windows - AnyDesk Remote Access
+on:
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
+        required: false
+        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
-  build:
-    name: Start Building...
+  remote_access:
+    name: AnyDesk für Remote-Zugriff einrichten
     runs-on: windows-latest
 
     steps:
-      - name: Downloading & installing Essentials
+      - name: Runner vorbereiten und AnyDesk installieren
         run: |
-          Invoke-WebRequest -Uri "https://gitlab.com/chamod12/lm_win-10_github_rdp/-/raw/main/Downloads.bat" -OutFile "Downloads.bat"
-          cmd /c Downloads.bat
+          # Schritt 1: AnyDesk-Installer herunterladen
+          Write-Host "Starte die AnyDesk-Einrichtung..."
+          Write-Host "Lade den AnyDesk-Installer von den offiziellen Quellen herunter..."
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "$env:TEMP\AnyDesk.exe" -ErrorAction Stop
 
-      - name: Connect to LiteManager
-        run: cmd /c show.bat
+          # Schritt 2: AnyDesk unbeaufsichtigt installieren
+          Write-Host "Installiere AnyDesk unbeaufsichtigt. Dies kann einen Moment dauern..."
+          # Verwende die --install und --silent Parameter für die unbeaufsichtigte Installation.
+          # Optional: --start-with-win für automatischen Start mit Windows, --create-desktop-icon für ein Desktop-Symbol.
+          Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install", "`"${env:ProgramFiles(x86)}\AnyDesk`"", "--silent", "--start-with-win" -Wait -NoNewWindow -ErrorAction Stop
 
-      - name: Time Counter
-        run: cmd /c loop.bat
+          # Schritt 3: Warten, bis der AnyDesk-Dienst initialisiert und die ID generiert hat
+          Write-Host "Warte, bis der AnyDesk-Dienst initialisiert und die ID generiert hat (ca. 15 Sekunden)..."
+          Start-Sleep -Seconds 15
+
+          # Schritt 4: AnyDesk ID abrufen
+          # Die AnyDesk ID wird in der Datei system.conf im Benutzerprofil gespeichert.
+          # Für eine installierte Version ist der Pfad typischerweise %ProgramData%\AnyDesk\system.conf
+          $anyDeskId = $null
+          $anyDeskConfigPath = "$env:ProgramData\AnyDesk\system.conf"
+
+          if (Test-Path $anyDeskConfigPath) {
+              Write-Host "Lese AnyDesk ID aus: $anyDeskConfigPath"
+              # Die ID ist in der Zeile "ad.anynet.id=" gespeichert.
+              $anyDeskIdLine = Get-Content -Path $anyDeskConfigPath | Select-String -Pattern "ad.anynet.id="
+              if ($anyDeskIdLine) {
+                  $anyDeskId = ($anyDeskIdLine -split '=')[1].Trim()
+              }
+          }
+
+          # Wenn die ID nicht gefunden wurde, versuchen Sie, den AnyDesk-Dienst neu zu starten und erneut zu warten
+          if (-not $anyDeskId) {
+              Write-Warning "AnyDesk ID nicht gefunden. Versuche, den AnyDesk-Dienst neu zu starten..."
+              try {
+                  Stop-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+                  Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+                  Write-Host "Warte erneut nach dem Dienstneustart (ca. 15 Sekunden)..."
+                  Start-Sleep -Seconds 15 # Erneut warten nach dem Neustart
+                  if (Test-Path $anyDeskConfigPath) {
+                      $anyDeskIdLine = Get-Content -Path $anyDeskConfigPath | Select-String -Pattern "ad.anynet.id="
+                      if ($anyDeskIdLine) {
+                          $anyDeskId = ($anyDeskIdLine -split '=')[1].Trim()
+                      }
+                  }
+              } catch {
+                  Write-Error "Fehler beim Neustart des AnyDesk-Dienstes: $($_.Exception.Message)"
+              }
+          }
+
+          # Schritt 5: AnyDesk ID an den GitHub Actions Workflow-Output ausgeben
+          if ($anyDeskId) {
+              Write-Host "AnyDesk ID erfolgreich abgerufen: $anyDeskId"
+              echo "anydesk_id=$anyDeskId" >> $GITHUB_OUTPUT
+          } else {
+              Write-Error "FEHLER: AnyDesk ID konnte nach mehreren Versuchen nicht abgerufen werden. Fernverbindung ist möglicherweise nicht möglich."
+              echo "anydesk_id=NOT_AVAILABLE" >> $GITHUB_OUTPUT
+          }
+
+          # Schritt 6: Ein Platzhalter-Passwort generieren und ausgeben
+          # WICHTIGER HINWEIS ZUM PASSWORT:
+          # Für den unbeaufsichtigten Zugriff in AnyDesk müssen Sie normalerweise ein festes Passwort festlegen.
+          # Dies kann über die AnyDesk-Einstellungen oder die Befehlszeile mit Administratorrechten erfolgen.
+          # Der Befehl 'echo <password> | anydesk --set-password' kann verwendet werden, benötigt aber erhöhte Rechte.
+          # In GitHub Actions wird der Runner als Administrator ausgeführt, daher sollte dies funktionieren.
+          # Beachten Sie, dass das Passwort im Workflow-Log sichtbar ist, wenn es direkt so festgelegt wird.
+          # Für eine sicherere Handhabung sollten Sie GitHub Secrets verwenden.
+          Write-Host "Generiere ein zufälliges Passwort für den unbeaufsichtigten AnyDesk-Zugriff..."
+          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
+          $randomPassword = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
+          Write-Host "Versuche, das AnyDesk-Passwort festzulegen..."
+          # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
+          # Das `echo` pipe-t das Passwort an den anydesk.exe Befehl.
+          echo $randomPassword | & "$env:ProgramFiles(x86)\AnyDesk\AnyDesk.exe" --set-password
+          if ($LASTEXITCODE -eq 0) {
+              Write-Host "AnyDesk Passwort erfolgreich festgelegt."
+              echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
+          } else {
+              Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $LASTEXITCODE. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
+              echo "anydesk_password=PASSWORD_SET_FAILED" >> $GITHUB_OUTPUT
+          }
+
+      - name: Runner aktiv halten
+        run: |
+          # Dieser Schritt hält den GitHub Actions Runner für eine angegebene Dauer aktiv.
+          # Dies ist notwendig, damit Sie Zeit haben, sich über AnyDesk zu verbinden.
+          # Die maximale Job-Dauer für GitHub Actions beträgt 360 Minuten (6 Stunden).
+          $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
+          if ($durationMinutes -gt 360) {
+              $durationMinutes = 360
+              Write-Warning "Dauer auf maximal 360 Minuten begrenzt."
+          }
+          $durationSeconds = $durationMinutes * 60
+          Write-Host "Halte den Runner für $durationMinutes Minuten ($durationSeconds Sekunden) aktiv..."
+          Start-Sleep -Seconds $durationSeconds
+        shell: pwsh
