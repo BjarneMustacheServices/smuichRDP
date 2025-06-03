@@ -1,11 +1,6 @@
 name: Windows - AnyDesk Remote Access
 on:
   workflow_dispatch:
-    inputs:
-      duration_minutes:
-        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
-        required: false
-        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
   remote_access:
@@ -24,8 +19,9 @@ jobs:
           Write-Host "Installiere AnyDesk unbeaufsichtigt. Dies kann einen Moment dauern..."
           # Verwende die --install und --silent Parameter für die unbeaufsichtigte Installation.
           # Optional: --start-with-win für automatischen Start mit Windows, --create-desktop-icon für ein Desktop-Symbol.
-          # Verwende $env:ProgramFilesX86 für eine robustere Pfadangabe.
-          $installPath = Join-Path -Path "$env:ProgramFilesX86" -ChildPath "AnyDesk"
+          # Verwende [System.Environment]::GetFolderPath('ProgramFilesX86') für eine robustere Pfadangabe.
+          $programFilesX86Path = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFilesX86)
+          $installPath = Join-Path -Path "$programFilesX86Path" -ChildPath "AnyDesk"
           Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install", "`"$installPath`"", "--silent", "--start-with-win" -Wait -NoNewWindow -ErrorAction Stop
 
           # Schritt 3: Warten, bis der AnyDesk-Dienst initialisiert und die ID generiert hat
@@ -88,7 +84,7 @@ jobs:
           $randomPassword = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
           
           # Definieren Sie den vollständigen Pfad zur AnyDesk-Ausführungsdatei robuster
-          $anyDeskExePath = Join-Path -Path "$env:ProgramFilesX86" -ChildPath "AnyDesk\AnyDesk.exe"
+          $anyDeskExePath = Join-Path -Path "$programFilesX86Path" -ChildPath "AnyDesk\AnyDesk.exe"
 
           if (-not (Test-Path $anyDeskExePath)) {
               Write-Error "AnyDesk-Ausführungsdatei nicht gefunden unter $anyDeskExePath. Passwort kann nicht festgelegt werden."
