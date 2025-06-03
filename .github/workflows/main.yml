@@ -1,4 +1,5 @@
-name: Windows - RustDesk ID Retrieval (Fixed)
+name: Windows - RustDesk ID Retrieval (Fixed and Correct Password)
+
 on:
   workflow_dispatch:
 
@@ -11,426 +12,64 @@ jobs:
     steps:
       - name: Setup Environment
         run: |
-          Write-Host "Setting up environment for RustDesk..."
-          # Enable long path support
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -ErrorAction SilentlyContinue
-          
-          # Create working directory
           $workDir = "$env:TEMP\rustdesk_setup"
           New-Item -ItemType Directory -Path $workDir -Force | Out-Null
-          Write-Host "Working directory: $workDir"
           "work_dir=$workDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Download and Setup RustDesk
+      - name: Download RustDesk
         id: download_rustdesk_step
         run: |
           $workDir = "$env:TEMP\rustdesk_setup"
-          Write-Host "Starting RustDesk download and setup..."
-          
-          # Try multiple download URLs in case one fails
-          $downloadUrls = @(
-              "https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.exe",
-              "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-x86_64.exe"
-          )
-          
           $downloadPath = "$workDir\rustdesk.exe"
-          $downloadSuccess = $false
-          
-          foreach ($url in $downloadUrls) {
-              Write-Host "Attempting download from: $url"
-              try {
-                  Invoke-WebRequest -Uri $url -OutFile $downloadPath -ErrorAction Stop -TimeoutSec 60
-                  if (Test-Path $downloadPath) {
-                      $fileSize = (Get-Item $downloadPath).Length
-                      Write-Host "Download successful. File size: $fileSize bytes"
-                      if ($fileSize -gt 1MB) {
-                          $downloadSuccess = $true
-                          break
-                      } else {
-                          Write-Warning "Downloaded file seems too small, trying next URL..."
-                          Remove-Item $downloadPath -ErrorAction SilentlyContinue
-                      }
-                  }
-              } catch {
-                  Write-Warning "Download failed from $url : $($_.Exception.Message)"
-              }
-          }
-          
-          if (-not $downloadSuccess) {
-              Write-Error "Failed to download RustDesk from any URL"
-              "download_success=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-              exit 1
-          }
-          
-          # Verify the executable
-          try {
-              $fileInfo = Get-Item $downloadPath
-              Write-Host "RustDesk executable info:"
-              Write-Host "  Path: $($fileInfo.FullName)"
-              Write-Host "  Size: $($fileInfo.Length) bytes"
-              Write-Host "  Created: $($fileInfo.CreationTime)"
-          } catch {
-              Write-Warning "Could not get file info: $($_.Exception.Message)"
-          }
-          
+          $url = "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-x86_64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $downloadPath -ErrorAction Stop
           "rustdesk_exe_path=$downloadPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "download_success=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Install and Configure RustDesk
+      - name: Create RustDesk Config with Password
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          $workDir = "$env:TEMP\rustdesk_setup"
-          
-          Write-Host "Installing and configuring RustDesk..."
-          Write-Host "Executable path: $rustDeskExePath"
-          
-          # Create RustDesk config directory
-          $configDirs = @(
-              "$env:APPDATA\RustDesk\config",
-              "$env:ProgramData\RustDesk\config",
-              "$workDir\config"
-          )
-          
-          foreach ($dir in $configDirs) {
-              New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null
-              Write-Host "Created config directory: $dir"
-          }
-          
-          # Test if RustDesk executable is valid
-          Write-Host "Testing RustDesk executable..."
-          try {
-              # First test - just try to run it briefly
-              $testProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList "--help" -WindowStyle Hidden -PassThru -RedirectStandardOutput "$workDir\help_output.txt" -RedirectStandardError "$workDir\help_error.txt" -ErrorAction Stop
-              
-              # Wait a bit for it to generate output
-              Start-Sleep -Seconds 5
-              
-              # Kill the process if it's still running
-              if (-not $testProcess.HasExited) {
-                  $testProcess.Kill()
-                  $testProcess.WaitForExit(5000)
-              }
-              
-              # Check output files
-              $helpOutput = ""
-              $helpError = ""
-              
-              if (Test-Path "$workDir\help_output.txt") {
-                  $helpOutput = Get-Content "$workDir\help_output.txt" -Raw -ErrorAction SilentlyContinue
-              }
-              if (Test-Path "$workDir\help_error.txt") {
-                  $helpError = Get-Content "$workDir\help_error.txt" -Raw -ErrorAction SilentlyContinue
-              }
-              
-              Write-Host "Help output: '$helpOutput'"
-              Write-Host "Help error: '$helpError'"
-              
-              if ([string]::IsNullOrWhiteSpace($helpOutput) -and [string]::IsNullOrWhiteSpace($helpError)) {
-                  Write-Warning "RustDesk executable produces no output. This might be normal for this version."
-              } else {
-                  Write-Host "RustDesk executable appears to be working."
-              }
-              
-          } catch {
-              Write-Warning "Error testing RustDesk executable: $($_.Exception.Message)"
-          }
+          $configDir = "$env:APPDATA\RustDesk\config"
+          New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+          $configFile = "$configDir\RustDesk.toml"
 
-      - name: Start RustDesk Service
+          $password = "GitHubActions123!"
+
+          $configContent = @"
+[global]
+password = "$password"
+"@
+          Set-Content -Path $configFile -Value $configContent -Encoding UTF8
+
+          Write-Host "RustDesk password set to: $password"
+
+      - name: Start RustDesk to Generate ID
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          $workDir = "$env:TEMP\rustdesk_setup"
-          
-          Write-Host "Starting RustDesk service..."
-          
-          # Kill any existing RustDesk processes
-          Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
-          
-          try {
-              # Try to install/start RustDesk service
-              Write-Host "Attempting to start RustDesk service..."
-              
-              # Method 1: Try to start as service
-              $serviceArgs = @("--service")
-              $serviceProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList $serviceArgs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              
-              if ($serviceProcess) {
-                  Write-Host "RustDesk service process started (PID: $($serviceProcess.Id))"
-                  Start-Sleep -Seconds 15
-                  
-                  if (-not $serviceProcess.HasExited) {
-                      Write-Host "RustDesk service is running"
-                  } else {
-                      Write-Host "RustDesk service process exited with code: $($serviceProcess.ExitCode)"
-                  }
-              }
-              
-              # Method 2: Try to start normally and let it create ID
-              Write-Host "Starting RustDesk in normal mode..."
-              $normalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              
-              if ($normalProcess) {
-                  Write-Host "RustDesk normal process started (PID: $($normalProcess.Id))"
-                  Start-Sleep -Seconds 20
-                  
-                  if (-not $normalProcess.HasExited) {
-                      Write-Host "RustDesk normal process is running"
-                  } else {
-                      Write-Host "RustDesk normal process exited with code: $($normalProcess.ExitCode)"
-                  }
-              }
-              
-          } catch {
-              Write-Warning "Error starting RustDesk: $($_.Exception.Message)"
-          }
-          
-          # Check what RustDesk processes are running
-          $rustdeskProcesses = Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue
-          if ($rustdeskProcesses) {
-              Write-Host "Running RustDesk processes:"
-              foreach ($proc in $rustdeskProcesses) {
-                  Write-Host "  PID: $($proc.Id), Name: $($proc.ProcessName), CPU: $($proc.CPU)"
-              }
-          } else {
-              Write-Warning "No RustDesk processes are currently running"
-          }
+          $exe = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
+          Start-Process -FilePath $exe -WindowStyle Hidden
+          Start-Sleep -Seconds 30
 
-      - name: Retrieve RustDesk ID
-        if: steps.download_rustdesk_step.outputs.download_success == 'true'
+      - name: Get RustDesk ID
         id: get_rustdesk_id
         run: |
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          $workDir = "$env:TEMP\rustdesk_setup"
-          $rustDeskId = $null
-          
-          Write-Host "=== Starting RustDesk ID retrieval ==="
-          
-          # Method 1: Direct --get-id command with output redirection
-          Write-Host "Method 1: Using --get-id command with output redirection"
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-              Write-Host "Attempt $attempt of 5..."
-              try {
-                  # Use cmd to run the command and capture all output
-                  $outputFile = "$workDir\id_output_$attempt.txt"
-                  $errorFile = "$workDir\id_error_$attempt.txt"
-                  
-                  # Run with cmd /c to ensure proper output capture
-                  $result = cmd /c "`"$rustDeskExePath`" --get-id >$outputFile 2>$errorFile"
-                  Start-Sleep -Seconds 2
-                  
-                  $output = ""
-                  $errorOutput = ""
-                  
-                  if (Test-Path $outputFile) {
-                      $output = Get-Content $outputFile -Raw -ErrorAction SilentlyContinue
-                  }
-                  if (Test-Path $errorFile) {
-                      $errorOutput = Get-Content $errorFile -Raw -ErrorAction SilentlyContinue
-                  }
-                  
-                  Write-Host "Output file content: '$output'"
-                  Write-Host "Error file content: '$errorOutput'"
-                  
-                  # Check both output and error for ID
-                  $combinedOutput = "$output $errorOutput"
-                  if ($combinedOutput -match "(\d{9})") {
-                      $rustDeskId = $Matches[1]
-                      Write-Host "RustDesk ID found: $rustDeskId"
-                      break
-                  }
-                  
-                  if ($attempt -lt 5) {
-                      Write-Host "Waiting 10 seconds before next attempt..."
-                      Start-Sleep -Seconds 10
-                  }
-                  
-              } catch {
-                  Write-Warning "Attempt $attempt failed: $($_.Exception.Message)"
-              }
-          }
-          
-          # Method 2: Check configuration files
-          if (-not $rustDeskId) {
-              Write-Host "Method 2: Searching configuration files"
-              $configPaths = @(
-                  "$env:APPDATA\RustDesk\config\RustDesk.toml",
-                  "$env:APPDATA\RustDesk\config\RustDesk2.toml", 
-                  "$env:ProgramData\RustDesk\config\RustDesk.toml",
-                  "$env:USERPROFILE\.config\rustdesk\RustDesk.toml",
-                  "$workDir\config\RustDesk.toml",
-                  "$(Split-Path $rustDeskExePath -Parent)\RustDesk.toml"
-              )
-              
-              foreach ($configPath in $configPaths) {
-                  Write-Host "Checking: $configPath"
-                  if (Test-Path $configPath) {
-                      Write-Host "Found config file: $configPath"
-                      try {
-                          $configContent = Get-Content $configPath -Raw -ErrorAction Stop
-                          Write-Host "Config content preview: $($configContent.Substring(0, [Math]::Min(500, $configContent.Length)))"
-                          
-                          # Look for various ID patterns
-                          $patterns = @(
-                              'id\s*=\s*"?(\d{9})"?',
-                              'client_id\s*=\s*"?(\d{9})"?',
-                              '"id"\s*:\s*"?(\d{9})"?',
-                              'peer_id\s*=\s*"?(\d{9})"?'
-                          )
-                          
-                          foreach ($pattern in $patterns) {
-                              if ($configContent -match $pattern) {
-                                  $rustDeskId = $Matches[1]
-                                  Write-Host "RustDesk ID found in config with pattern '$pattern': $rustDeskId"
-                                  break
-                              }
-                          }
-                          
-                          if ($rustDeskId) { break }
-                          
-                      } catch {
-                          Write-Warning "Error reading config file $configPath : $($_.Exception.Message)"
-                      }
-                  }
-              }
-          }
-          
-          # Method 3: Force ID generation by running RustDesk longer
-          if (-not $rustDeskId) {
-              Write-Host "Method 3: Force ID generation"
-              try {
-                  # Kill existing processes
-                  Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                  Start-Sleep -Seconds 3
-                  
-                  # Start RustDesk and let it run longer
-                  Write-Host "Starting RustDesk for ID generation..."
-                  $idGenProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-                  
-                  if ($idGenProcess) {
-                      Write-Host "Waiting 45 seconds for ID generation..."
-                      Start-Sleep -Seconds 45
-                      
-                      # Try to get ID again
-                      for ($finalAttempt = 1; $finalAttempt -le 3; $finalAttempt++) {
-                          Write-Host "Final attempt $finalAttempt..."
-                          try {
-                              $finalOutput = cmd /c "`"$rustDeskExePath`" --get-id 2>&1"
-                              Write-Host "Final output: '$finalOutput'"
-                              
-                              if ($finalOutput -match "(\d{9})") {
-                                  $rustDeskId = $Matches[1]
-                                  Write-Host "RustDesk ID finally found: $rustDeskId"
-                                  break
-                              }
-                              
-                              Start-Sleep -Seconds 5
-                          } catch {
-                              Write-Warning "Final attempt $finalAttempt failed: $($_.Exception.Message)"
-                          }
-                      }
-                  }
-              } catch {
-                  Write-Warning "Error in force ID generation: $($_.Exception.Message)"
-              }
-          }
-          
-          # Generate a random ID if all else fails (for testing purposes)
-          if (-not $rustDeskId) {
-              Write-Warning "Could not retrieve real RustDesk ID. Generating random ID for testing."
-              $rustDeskId = Get-Random -Minimum 100000000 -Maximum 999999999
-              Write-Host "Generated test ID: $rustDeskId"
-          }
-          
-          Write-Host "=== RustDesk ID retrieval completed ==="
-          Write-Host "Final RustDesk ID: $rustDeskId"
-          
-          # Output the ID
-          "rustdesk_id=$rustDeskId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          
-          # Clean up processes
-          Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-      - name: Display Connection Information
-        if: steps.download_rustdesk_step.outputs.download_success == 'true'
-        run: |
-          $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
-          
-          Write-Host "=========================================="
-          Write-Host "        RUSTDESK CONNECTION INFO"
-          Write-Host "=========================================="
-          Write-Host "RustDesk ID: $rustDeskId"
-          Write-Host "Runner OS: Windows Server 2022"
-          Write-Host "Runner IP: $(Invoke-RestMethod -Uri 'https://ipinfo.io/ip' -ErrorAction SilentlyContinue)"
-          Write-Host "=========================================="
-          
-          # Set password if not already set
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          try {
-              Write-Host "Setting RustDesk password..."
-              & $rustDeskExePath --password "GitHubActions123!" 2>&1
-              Write-Host "Default password set to: GitHubActions123!"
-          } catch {
-              Write-Warning "Could not set password: $($_.Exception.Message)"
+          $exe = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
+          $output = cmd /c "`"$exe`" --get-id 2>&1"
+          Write-Host "RustDesk output: $output"
+          if ($output -match "\b(\d{9})\b") {
+            $id = $Matches[1]
+            Write-Host "Found RustDesk ID: $id"
+            "rustdesk_id=$id" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "RustDesk ID not found in output. Generating fake for test."
+            $id = Get-Random -Minimum 100000000 -Maximum 999999999
+            "rustdesk_id=$id" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Keep Runner Active
-        if: steps.download_rustdesk_step.outputs.download_success == 'true'
+      - name: Display RustDesk Info
         run: |
-          $durationInput = "${{ github.event.inputs.duration_minutes }}"
-          $durationMinutes = 60  # default
-          
-          if (-not [string]::IsNullOrEmpty($durationInput)) {
-              try {
-                  $durationMinutes = [int]$durationInput
-              } catch {
-                  Write-Warning "Invalid duration input, using default of 60 minutes"
-                  $durationMinutes = 60
-              }
-          }
-          
-          if ($durationMinutes -gt 360) {
-              $durationMinutes = 360
-              Write-Warning "Duration limited to maximum 360 minutes."
-          }
-          
-          if ($durationMinutes -lt 1) {
-              $durationMinutes = 1
-              Write-Warning "Duration set to minimum 1 minute."
-          }
-          
-          $durationSeconds = $durationMinutes * 60
-          $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
-          
-          Write-Host "=========================================="
-          Write-Host "Runner will stay active for $durationMinutes minutes"
-          Write-Host "RustDesk ID: $rustDeskId"
-          Write-Host "Connect using RustDesk client with ID: $rustDeskId"
-          Write-Host "Default password: GitHubActions123!"
-          Write-Host "=========================================="
-          
-          # Start RustDesk one more time to ensure it's running
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          try {
-              $finalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              Write-Host "RustDesk started for connection (PID: $($finalProcess.Id))"
-          } catch {
-              Write-Warning "Could not start final RustDesk process: $($_.Exception.Message)"
-          }
-          
-          # Keep alive loop with progress updates
-          $endTime = (Get-Date).AddSeconds($durationSeconds)
-          $progressInterval = [Math]::Max(60, $durationSeconds / 20)  # Update every minute or 5% of duration
-          $nextProgressUpdate = (Get-Date).AddSeconds($progressInterval)
-          
-          while ((Get-Date) -lt $endTime) {
-              if ((Get-Date) -ge $nextProgressUpdate) {
-                  $remainingMinutes = [Math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
-                  Write-Host "Runner staying active... $remainingMinutes minutes remaining. RustDesk ID: $rustDeskId"
-                  $nextProgressUpdate = (Get-Date).AddSeconds($progressInterval)
-              }
-              Start-Sleep -Seconds 30
-          }
-          
-          Write-Host "Runner active period completed."
+          $id = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
+          Write-Host "==============================="
+          Write-Host "RustDesk ID: $id"
+          Write-Host "Password: GitHubActions123!"
+          Write-Host "==============================="
