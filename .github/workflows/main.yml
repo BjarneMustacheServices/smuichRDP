@@ -1,164 +1,61 @@
-name: Windows - AnyDesk Remote Access
+name: Windows - RDP Remote Access
 on:
   workflow_dispatch:
 
 jobs:
   remote_access:
-    name: AnyDesk für Remote-Zugriff einrichten
+    name: RDP für Remote-Zugriff einrichten
     runs-on: windows-latest
 
     steps:
-      - name: Runner vorbereiten und AnyDesk installieren
+      - name: RDP aktivieren und Benutzer einrichten
         run: |
-          # Schritt 1: AnyDesk-Installer herunterladen
-          Write-Host "Starte die AnyDesk-Einrichtung..."
-          Write-Host "Lade den AnyDesk-Installer von den offiziellen Quellen herunter..."
-          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "$env:TEMP\AnyDesk.exe" -ErrorAction Stop
+          Write-Host "Starte die RDP-Einrichtung..."
 
-          # Schritt 2: AnyDesk unbeaufsichtigt installieren
-          Write-Host "Installiere AnyDesk unbeaufsichtigt. Dies kann einen Moment dauern..."
-          # Verwende die --install und --silent Parameter für die unbeaufsichtigte Installation.
-          # Optional: --start-with-win für automatischen Start mit Windows, --create-desktop-icon für ein Desktop-Symbol.
-          # Verwende [System.Environment]::GetFolderPath('ProgramFilesX86') für eine robustere Pfadangabe.
-          $programFilesX86Path = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFilesX86)
-          $installPath = Join-Path -Path "$programFilesX86Path" -ChildPath "AnyDesk"
-          Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install", "`"$installPath`"", "--silent", "--start-with-win" -Wait -NoNewWindow -ErrorAction Stop
+          # Schritt 1: Remote Desktop aktivieren
+          Write-Host "Aktiviere Remote Desktop..."
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
+          Write-Host "Remote Desktop aktiviert."
 
-          # Schritt 3: Warten, bis der AnyDesk-Dienst initialisiert und die ID generiert hat
-          Write-Host "Warte, bis der AnyDesk-Dienst initialisiert und die ID generiert hat (ca. 15 Sekunden)..."
-          Start-Sleep -Seconds 15
+          # Schritt 2: Firewall-Regel für RDP hinzufügen
+          Write-Host "Füge Firewall-Regel für Remote Desktop hinzu..."
+          New-NetFirewallRule -DisplayName "RemoteDesktop" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
+          Write-Host "Firewall-Regel hinzugefügt."
 
-          # Schritt 4: AnyDesk ID abrufen
-          # Die AnyDesk ID wird in der Datei system.conf im Benutzerprofil gespeichert.
-          # Für eine installierte Version ist der Pfad typischerweise %ProgramData%\AnyDesk\system.conf
-          $anyDeskId = $null
-          $anyDeskConfigPath = "$env:ProgramData\AnyDesk\system.conf"
-
-          if (Test-Path $anyDeskConfigPath) {
-              Write-Host "Lese AnyDesk ID aus: $anyDeskConfigPath"
-              # Die ID ist in der Zeile "ad.anynet.id=" gespeichert.
-              $anyDeskIdLine = Get-Content -Path $anyDeskConfigPath | Select-String -Pattern "ad.anynet.id="
-              if ($anyDeskIdLine) {
-                  $anyDeskId = ($anyDeskIdLine -split '=')[1].Trim()
-              }
-          }
-
-          # Wenn die ID nicht gefunden wurde, versuchen Sie, den AnyDesk-Dienst neu zu starten und erneut zu warten
-          if (-not $anyDeskId) {
-              Write-Warning "AnyDesk ID nicht gefunden. Versuche, den AnyDesk-Dienst neu zu starten..."
-              try {
-                  Stop-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-                  Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-                  Write-Host "Warte erneut nach dem Dienstneustart (ca. 15 Sekunden)..."
-                  Start-Sleep -Seconds 15 # Erneut warten nach dem Neustart
-                  if (Test-Path $anyDeskConfigPath) {
-                      $anyDeskIdLine = Get-Content -Path $anyDeskConfigPath | Select-String -Pattern "ad.anynet.id="
-                      if ($anyDeskIdLine) {
-                          $anyDeskId = ($anyDeskIdLine -split '=')[1].Trim()
-                      }
-                  }
-              } catch {
-                  Write-Error "Fehler beim Neustart des AnyDesk-Dienstes: $($_.Exception.Message)"
-              }
-          }
-
-          # Schritt 5: AnyDesk ID an den GitHub Actions Workflow-Output ausgeben
-          if ($anyDeskId) {
-              Write-Host "AnyDesk ID erfolgreich abgerufen: $anyDeskId"
-              echo "anydesk_id=$anyDeskId" >> $GITHUB_OUTPUT
-          } else {
-              Write-Error "FEHLER: AnyDesk ID konnte nach mehreren Versuchen nicht abgerufen werden. Fernverbindung ist möglicherweise nicht möglich."
-              echo "anydesk_id=NOT_AVAILABLE" >> $GITHUB_OUTPUT
-          }
-
-          # Schritt 6: Ein Platzhalter-Passwort generieren und ausgeben
-          # WICHTIGER HINWEIS ZUM PASSWORT:
-          # Für den unbeaufsichtigten Zugriff in AnyDesk müssen Sie normalerweise ein festes Passwort festlegen.
-          # Dies kann über die AnyDesk-Einstellungen oder die Befehlszeile mit Administratorrechten erfolgen.
-          # Der Befehl 'echo <password> | anydesk --set-password' kann verwendet werden, benötigt aber erhöhte Rechte.
-          # In GitHub Actions wird der Runner als Administrator ausgeführt, daher sollte dies funktionieren.
-          # Beachten Sie, dass das Passwort im Workflow-Log sichtbar ist, wenn es direkt so festgelegt wird.
-          # Für eine sicherere Handhabung sollten Sie GitHub Secrets verwenden.
-          Write-Host "Generiere ein zufälliges Passwort für den unbeaufsichtigten AnyDesk-Zugriff..."
+          # Schritt 3: Neuen Benutzer für RDP erstellen
+          $username = "ghrunner"
           $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
-          $randomPassword = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
-          
-          # Definieren Sie den vollständigen Pfad zur AnyDesk-Ausführungsdatei robuster
-          $anyDeskExePath = Join-Path -Path "$programFilesX86Path" -ChildPath "AnyDesk\AnyDesk.exe"
+          $password = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
 
-          if (-not (Test-Path $anyDeskExePath)) {
-              Write-Error "AnyDesk-Ausführungsdatei nicht gefunden unter $anyDeskExePath. Passwort kann nicht festgelegt werden."
-              echo "anydesk_password=EXECUTABLE_NOT_FOUND" >> $GITHUB_OUTPUT
-          } else {
-              Write-Host "Versuche, das AnyDesk-Passwort festzulegen..."
-              
-              # Überprüfen, ob der AnyDesk-Dienst läuft, und starten Sie ihn bei Bedarf
-              $serviceStatus = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-              if ($serviceStatus -and $serviceStatus.Status -eq "Running") {
-                  Write-Host "AnyDesk-Dienst läuft. Versuche, das Passwort festzulegen..."
-              } else {
-                  Write-Warning "AnyDesk-Dienst läuft nicht. Versuche, ihn zu starten..."
-                  try {
-                      Start-Service -Name "AnyDesk" -ErrorAction Stop
-                      Write-Host "AnyDesk-Dienst erfolgreich gestartet."
-                      Start-Sleep -Seconds 5 # Geben Sie dem Dienst einen Moment, um sich zu stabilisieren
-                  } catch {
-                      Write-Error "Fehler beim Starten des AnyDesk-Dienstes: $($_.Exception.Message). Passwort kann nicht festgelegt werden."
-                      echo "anydesk_password=SERVICE_START_FAILED" >> $GITHUB_OUTPUT
-                      # Beenden Sie diesen Block, da das Festlegen des Passworts nicht funktioniert
-                      return
-                  }
-              }
+          Write-Host "Erstelle neuen Benutzer '$username'..."
+          net user $username $password /add /y | Out-Null
+          Write-Host "Benutzer '$username' erstellt."
 
-              # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
-              # Verwende Start-Process mit RedirectStandardInput für robustere Eingabe.
-              try {
-                  $startProcessArgs = @{
-                      FilePath = $anyDeskExePath
-                      ArgumentList = "--set-password"
-                      PassThru = $true
-                      NoNewWindow = $true
-                      RedirectStandardInput = $true # Explizit als true setzen
-                      RedirectStandardOutput = $true
-                      RedirectStandardError = $true
-                      UseShellExecute = $false # Entscheidend für Stream-Umleitung
-                  }
-                  $process = Start-Process @startProcessArgs
+          # Schritt 4: Benutzer zur Remote Desktop Users Gruppe hinzufügen
+          Write-Host "Füge Benutzer '$username' zur 'Remote Desktop Users' Gruppe hinzu..."
+          net localgroup "Remote Desktop Users" $username /add | Out-Null
+          Write-Host "Benutzer '$username' zur Remote Desktop Users Gruppe hinzugefügt."
 
-                  $process.StandardInput.WriteLine($randomPassword)
-                  $process.StandardInput.Close()
-                  $process.WaitForExit(30000) # Warte bis zu 30 Sekunden, bis der Prozess beendet ist
-
-                  if ($process.HasExited) {
-                      $exitCode = $process.ExitCode
-                      $output = $process.StandardOutput.ReadToEnd()
-                      $errorOutput = $process.StandardError.ReadToEnd()
-
-                      Write-Host "AnyDesk --set-password Exit Code: $exitCode"
-                      if ($output) { Write-Host "AnyDesk --set-password Output: $output" }
-                      if ($errorOutput) { Write-Error "AnyDesk --set-password Error: $errorOutput" }
-
-                      if ($exitCode -eq 0) {
-                          Write-Host "AnyDesk Passwort erfolgreich festgelegt."
-                          echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
-                      } else {
-                          Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $exitCode. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
-                          echo "anydesk_password=PASSWORD_SET_FAILED_WITH_CODE_$exitCode" >> $GITHUB_OUTPUT
-                      }
-                  } else {
-                      Write-Error "FEHLER: AnyDesk Prozess zum Festlegen des Passworts hat nicht innerhalb der erwarteten Zeit beendet."
-                      echo "anydesk_password=PASSWORD_SET_TIMEOUT" >> $GITHUB_OUTPUT
-                  }
-              } catch {
-                  Write-Error "Fehler beim Ausführen von AnyDesk --set-password: $($_.Exception.Message)"
-                  echo "anydesk_password=PASSWORD_SET_EXCEPTION" >> $GITHUB_OUTPUT
-              }
+          # Schritt 5: Interne IP-Adresse des Runners abrufen
+          Write-Host "Rufe interne IP-Adresse ab..."
+          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "Ethernet*" -and $_.PrefixOrigin -eq "Dhcp"}).IPAddress
+          if (-not $ipAddress) {
+              $ipAddress = "UNKNOWN_IP"
+              Write-Warning "Konnte keine interne IP-Adresse abrufen."
           }
+          Write-Host "Interne IP-Adresse: $ipAddress"
+
+          # Schritt 6: RDP-Verbindungsinformationen an den GitHub Actions Workflow-Output ausgeben
+          echo "rdp_username=$username" >> $GITHUB_OUTPUT
+          echo "rdp_password=$password" >> $GITHUB_OUTPUT
+          echo "rdp_internal_ip=$ipAddress" >> $GITHUB_OUTPUT
+          Write-Host "RDP-Einrichtung abgeschlossen."
 
       - name: Runner aktiv halten
         run: |
           # Dieser Schritt hält den GitHub Actions Runner für eine angegebene Dauer aktiv.
-          # Dies ist notwendig, damit Sie Zeit haben, sich über AnyDesk zu verbinden.
+          # Dies ist notwendig, damit Sie Zeit haben, sich über RDP zu verbinden (falls ein Tunnel eingerichtet wird).
           # Die maximale Job-Dauer für GitHub Actions beträgt 360 Minuten (6 Stunden).
           $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
           if ($durationMinutes -gt 360) {
