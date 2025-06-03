@@ -24,7 +24,9 @@ jobs:
           Write-Host "Installiere AnyDesk unbeaufsichtigt. Dies kann einen Moment dauern..."
           # Verwende die --install und --silent Parameter für die unbeaufsichtigte Installation.
           # Optional: --start-with-win für automatischen Start mit Windows, --create-desktop-icon für ein Desktop-Symbol.
-          Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install", "`"${env:ProgramFiles(x86)}\AnyDesk`"", "--silent", "--start-with-win" -Wait -NoNewWindow -ErrorAction Stop
+          # Verwende $env:ProgramFilesX86 für eine robustere Pfadangabe.
+          $installPath = Join-Path -Path "$env:ProgramFilesX86" -ChildPath "AnyDesk"
+          Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install", "`"$installPath`"", "--silent", "--start-with-win" -Wait -NoNewWindow -ErrorAction Stop
 
           # Schritt 3: Warten, bis der AnyDesk-Dienst initialisiert und die ID generiert hat
           Write-Host "Warte, bis der AnyDesk-Dienst initialisiert und die ID generiert hat (ca. 15 Sekunden)..."
@@ -84,16 +86,25 @@ jobs:
           Write-Host "Generiere ein zufälliges Passwort für den unbeaufsichtigten AnyDesk-Zugriff..."
           $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
           $randomPassword = (1..16 | ForEach-Object { $chars | Get-Random }) -join ''
-          Write-Host "Versuche, das AnyDesk-Passwort festzulegen..."
-          # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
-          # Das `echo` pipe-t das Passwort an den anydesk.exe Befehl.
-          echo $randomPassword | & "$env:ProgramFiles(x86)\AnyDesk\AnyDesk.exe" --set-password
-          if ($LASTEXITCODE -eq 0) {
-              Write-Host "AnyDesk Passwort erfolgreich festgelegt."
-              echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
+          
+          # Definieren Sie den vollständigen Pfad zur AnyDesk-Ausführungsdatei robuster
+          $anyDeskExePath = Join-Path -Path "$env:ProgramFilesX86" -ChildPath "AnyDesk\AnyDesk.exe"
+
+          if (-not (Test-Path $anyDeskExePath)) {
+              Write-Error "AnyDesk-Ausführungsdatei nicht gefunden unter $anyDeskExePath. Passwort kann nicht festgelegt werden."
+              echo "anydesk_password=EXECUTABLE_NOT_FOUND" >> $GITHUB_OUTPUT
           } else {
-              Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $LASTEXITCODE. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
-              echo "anydesk_password=PASSWORD_SET_FAILED" >> $GITHUB_OUTPUT
+              Write-Host "Versuche, das AnyDesk-Passwort festzulegen..."
+              # Setze das Passwort für unbeaufsichtigten Zugriff. Dies erfordert Administratorrechte.
+              # Das `echo` pipe-t das Passwort an den anydesk.exe Befehl.
+              echo $randomPassword | & $anyDeskExePath --set-password
+              if ($LASTEXITCODE -eq 0) {
+                  Write-Host "AnyDesk Passwort erfolgreich festgelegt."
+                  echo "anydesk_password=$randomPassword" >> $GITHUB_OUTPUT
+              } else {
+                  Write-Error "FEHLER: AnyDesk Passwort konnte nicht festgelegt werden. Exit Code: $LASTEXITCODE. Möglicherweise ist unbeaufsichtigter Zugriff nicht möglich."
+                  echo "anydesk_password=PASSWORD_SET_FAILED" >> $GITHUB_OUTPUT
+              }
           }
 
       - name: Runner aktiv halten
