@@ -1,6 +1,11 @@
 name: Windows - RustDesk Remote Access
 on:
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
+        required: false
+        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
   remote_access:
@@ -61,7 +66,8 @@ jobs:
           try {
               # Some sources suggest --get-id only works after GUI has run once.
               # We'll try running the GUI briefly in the background first, then try --get-id.
-              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru
+              # Use -ErrorAction SilentlyContinue for the background process to avoid stopping the script
+              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
               Start-Sleep -Seconds 10 # Give it time to generate ID if it needs GUI interaction
 
               $idProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList "--get-id" -PassThru -NoNewWindow -RedirectStandardOutput -RedirectStandardError
@@ -71,14 +77,16 @@ jobs:
                   $idOutput = $idProcess.StandardOutput.ReadToEnd().Trim()
                   $idError = $idProcess.StandardError.ReadToEnd().Trim()
                   Write-Host "RustDesk --get-id Exit Code: $($idProcess.ExitCode)"
-                  if ($idOutput) { Write-Host "RustDesk --get-id Output: $idOutput" }
-                  if ($idError) { Write-Error "RustDesk --get-id Error: $idError" }
+                  if ($idOutput) { Write-Host "RustDesk --get-id Output: '$idOutput'" } # Added quotes to see exact output
+                  if ($idError) { Write-Error "RustDesk --get-id Error: '$idError'" } # Added quotes
 
                   # RustDesk --get-id outputs just the ID, sometimes with a newline.
-                  if ($idOutput -match "^\d{9}$") { # Basic validation for a 9-digit ID
-                      $rustDeskId = $idOutput
+                  # Make regex more flexible to find 9 digits anywhere.
+                  if ($idOutput -match "(\d{9})") {
+                      $rustDeskId = $Matches[1]
+                      Write-Host "RustDesk ID found via --get-id: $rustDeskId"
                   } else {
-                      Write-Warning "RustDesk --get-id returned unexpected output: '$idOutput'. Trying to read from config file."
+                      Write-Warning "RustDesk --get-id returned no 9-digit ID in output: '$idOutput'. Trying to read from config file."
                   }
               } else {
                   Write-Error "RustDesk --get-id process timed out."
@@ -90,19 +98,27 @@ jobs:
           # Fallback: Try to read ID from config file if --get-id failed or returned unexpected output
           if (-not $rustDeskId) {
               Write-Host "Attempting to read RustDesk ID from config file..."
-              $rustDeskConfigPath = Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml"
-              if (Test-Path $rustDeskConfigPath) {
-                  Write-Host "Reading RustDesk ID from: $rustDeskConfigPath"
-                  # The ID is typically in the [options] section, e.g., "client_id = 123456789"
-                  $configContent = Get-Content -Path $rustDeskConfigPath | Out-String
-                  if ($configContent -match "client_id\s*=\s*(\d{9})") {
-                      $rustDeskId = $Matches[1]
-                      Write-Host "RustDesk ID found in config file: $rustDeskId"
+              # Prioritize %ProgramData% path for system-wide installs, then %APPDATA%
+              $rustDeskConfigPaths = @(
+                  (Join-Path -Path "$env:ProgramData" -ChildPath "RustDesk\config\RustDesk.toml"),
+                  (Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml")
+              )
+
+              foreach ($configPath in $rustDeskConfigPaths) {
+                  if (Test-Path $configPath) {
+                      Write-Host "Reading RustDesk ID from: $configPath"
+                      # The ID is typically in the [options] section, e.g., "client_id = 123456789"
+                      $configContent = Get-Content -Path $configPath | Out-String
+                      if ($configContent -match "client_id\s*=\s*(\d{9})") {
+                          $rustDeskId = $Matches[1]
+                          Write-Host "RustDesk ID found in config file: $rustDeskId"
+                          break # Exit loop once ID is found
+                      } else {
+                          Write-Warning "RustDesk ID not found in config file: $configPath"
+                      }
                   } else {
-                      Write-Warning "RustDesk ID not found in config file: $rustDeskConfigPath"
+                      Write-Warning "RustDesk config file not found at $configPath."
                   }
-              } else {
-                  Write-Warning "RustDesk config file not found at $rustDeskConfigPath."
               }
           }
 
@@ -133,7 +149,6 @@ jobs:
           } else {
               Write-Host "Attempting to set RustDesk password..."
               
-              # Ensure RustDesk service is running before attempting to set password
               # RustDesk might not run as a persistent service by default after silent install.
               # The --password command usually configures the client directly.
               try {
@@ -179,7 +194,7 @@ jobs:
         run: |
           # This step keeps the GitHub Actions Runner alive for a specified duration.
           # This is necessary to allow you time to connect via RustDesk.
-          # The maximum job duration for GitHub Actions is 360 minutes (6 hours).
+          # The maximum job duration for GitHub Actions is 360 minutes (6 Stunden).
           $durationMinutes = [int]"${{ github.event.inputs.duration_minutes }}"
           if ($durationMinutes -gt 360) {
               $durationMinutes = 360
