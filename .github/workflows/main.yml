@@ -1,11 +1,6 @@
 name: Windows - RustDesk Remote Access
 on:
   workflow_dispatch:
-    inputs:
-      duration_minutes:
-        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
-        required: false
-        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
   remote_access:
@@ -17,17 +12,17 @@ jobs:
         run: |
           # Step 1: Download RustDesk installer
           Write-Host "Starting RustDesk setup..."
-          Write-Host "Downloading RustDesk installer from official sources..."
-          # Fetch the latest stable release URL from GitHub API
-          $rustDeskDownloadUrl = (Invoke-RestMethod -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest").assets | Where-Object {$_.name -like "rustdesk-*-x86_64.exe"} | Select-Object -ExpandProperty browser_download_url | Select-Object -First 1
+          Write-Host "Downloading RustDesk installer from the specified URL..."
+          # Using the specific URL provided by the user
+          $rustDeskDownloadUrl = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/299354207/5e043863-fae9-4af1-aa48-1574893ba7d3?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=releaseassetproduction%2F20250603%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250603T143111Z&X-Amz-Expires=300&X-Amz-Signature=3d44707c785f42120c8d3b4dc0eb52fadacbfcd06a62d912b202bec29e0e8f8d&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3Drustdesk-1.4.0-x86_64.exe&response-content-type=application%2Foctet-stream"
 
-          if (-not $rustDeskDownloadUrl) {
-              Write-Error "Failed to find RustDesk download URL. Exiting."
+          try {
+              Invoke-WebRequest -Uri $rustDeskDownloadUrl -OutFile "$env:TEMP\RustDesk.exe" -ErrorAction Stop
+              Write-Host "RustDesk installer downloaded to $env:TEMP\RustDesk.exe"
+          } catch {
+              Write-Error "Failed to download RustDesk installer from '$rustDeskDownloadUrl': $($_.Exception.Message)"
               exit 1
           }
-
-          Invoke-WebRequest -Uri $rustDeskDownloadUrl -OutFile "$env:TEMP\RustDesk.exe" -ErrorAction Stop
-          Write-Host "RustDesk installer downloaded to $env:TEMP\RustDesk.exe"
 
           # Step 2: Install RustDesk silently
           Write-Host "Installing RustDesk silently. This may take a moment..."
@@ -142,7 +137,7 @@ jobs:
                               Write-Warning "RustDesk ID (client_id = 9 digits) not found in config file: $configPath"
                           }
                       } catch {
-                          Write-Error "Error reading config file $configPath: ${$_.Exception.Message}" # Corrected this line
+                          Write-Error "Error reading config file $configPath: $($_.Exception.Message)" # Corrected this line
                       }
                   } else {
                       Write-Warning "RustDesk config file not found at $configPath."
