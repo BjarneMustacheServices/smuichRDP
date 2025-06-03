@@ -1,11 +1,6 @@
 name: Windows - RustDesk ID Retrieval (Run Only)
 on:
   workflow_dispatch:
-    inputs:
-      duration_minutes:
-        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
-        required: false
-        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
 
 jobs:
   rustdesk_id_retrieval:
@@ -14,6 +9,7 @@ jobs:
 
     steps:
       - name: RustDesk herunterladen
+        id: download_rustdesk_step # Hinzugefügte ID für diesen Schritt
         run: |
           Write-Host "Starte RustDesk-Einrichtung..."
           Write-Host "Lade RustDesk-Anwendung von der angegebenen URL herunter..."
@@ -40,7 +36,8 @@ jobs:
 
       - name: RustDesk starten und ID abrufen
         run: |
-          $rustDeskExePath = "${{ steps.rustdesk_download.outputs.rustdesk_exe_path }}"
+          # Korrekte Referenzierung des Outputs des vorherigen Schritts
+          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
           if (-not $rustDeskExePath) {
               Write-Error "Fehler: RustDesk-Anwendungspfad nicht verfügbar. Job wird beendet."
               exit 1
