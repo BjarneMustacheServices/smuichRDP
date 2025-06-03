@@ -58,82 +58,166 @@ jobs:
           Write-Host "--- Starte RustDesk-Anwendung direkt und versuche ID abzurufen ---"
           Write-Host "Verwende RustDesk-Pfad: $rustDeskExePath"
 
-          # Starte RustDesk im Hintergrund
+          # Starte RustDesk im Hintergrund mit längerer Wartezeit
           Write-Host "Starte RustDesk-Anwendung im Hintergrund: '$rustDeskExePath --no-daemon'..."
           try {
               $process = Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction Stop
-              Write-Host "RustDesk-Hintergrundprozess gestartet (PID: $($process.Id)). Warte 20 Sekunden, damit die ID generiert wird..."
-              Start-Sleep -Seconds 20
+              Write-Host "RustDesk-Hintergrundprozess gestartet (PID: $($process.Id)). Warte 45 Sekunden für vollständige Initialisierung..."
+              Start-Sleep -Seconds 45  # Längere Wartezeit für bessere Initialisierung
               Write-Host "Wartezeit für ID-Generierung beendet."
+              
+              # Prüfe, ob der Prozess noch läuft
+              $runningProcess = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+              if ($runningProcess) {
+                  Write-Host "RustDesk-Prozess läuft noch (PID: $($process.Id))"
+              } else {
+                  Write-Warning "RustDesk-Prozess wurde möglicherweise beendet"
+              }
           } catch {
               Write-Warning "Konnte RustDesk-Hintergrundprozess nicht starten: $($_.Exception.Message). Versuche trotzdem ID abzurufen."
           }
 
-          # Versuche, die ID mit --get-id abzurufen
+          # Versuche mehrere Methoden, um die ID abzurufen
           $rustDeskId = $null
+          
+          # Methode 1: Direkt mit --get-id versuchen (mit mehreren Versuchen)
           Write-Host "Versuche, RustDesk ID mit '$rustDeskExePath --get-id' abzurufen..."
-          try {
-              $psi = New-Object System.Diagnostics.ProcessStartInfo
-              $psi.FileName = $rustDeskExePath
-              $psi.Arguments = "--get-id"
-              $psi.RedirectStandardOutput = $true
-              $psi.RedirectStandardError = $true
-              $psi.UseShellExecute = $false
-              $psi.CreateNoWindow = $true
-
-              $idProcess = New-Object System.Diagnostics.Process
-              $idProcess.StartInfo = $psi
-              $idProcess.Start() | Out-Null
-              
-              $timeout = $idProcess.WaitForExit(15000) # 15 Sekunden Timeout
-              
-              if ($timeout) {
-                  $idOutput = $idProcess.StandardOutput.ReadToEnd().Trim()
-                  $idError = $idProcess.StandardError.ReadToEnd().Trim()
-                  Write-Host "Befehl '$rustDeskExePath --get-id' beendet mit Exit Code: $($idProcess.ExitCode)"
-                  Write-Host "Standard-Ausgabe (STDOUT): '$idOutput'"
-                  if ($idError) { Write-Host "Standard-Fehler (STDERR): '$idError'" }
-
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+              Write-Host "Versuch $attempt von 3..."
+              try {
+                  $idOutput = & $rustDeskExePath --get-id 2>&1
+                  Write-Host "RustDesk --get-id Ausgabe (Versuch $attempt): '$idOutput'"
+                  
                   # Suche nach einer 9-stelligen ID in der Ausgabe
                   if ($idOutput -match "(\d{9})") {
                       $rustDeskId = $Matches[1]
                       Write-Host "RustDesk ID erfolgreich über --get-id gefunden: $rustDeskId"
+                      break
                   } else {
-                      Write-Warning "Keine 9-stellige ID in der --get-id-Ausgabe gefunden. Ausgabe war: '$idOutput'"
+                      Write-Warning "Keine 9-stellige ID in der --get-id-Ausgabe gefunden (Versuch $attempt). Ausgabe: '$idOutput'"
+                      if ($attempt -lt 3) {
+                          Write-Host "Warte 10 Sekunden vor nächstem Versuch..."
+                          Start-Sleep -Seconds 10
+                      }
                   }
-              } else {
-                  Write-Error "RustDesk --get-id-Prozess hat nach 15 Sekunden ein Timeout."
-                  $idProcess.Kill()
+              } catch {
+                  Write-Warning "Fehler beim Ausführen von RustDesk --get-id (Versuch $attempt): $($_.Exception.Message)"
+                  if ($attempt -lt 3) {
+                      Write-Host "Warte 10 Sekunden vor nächstem Versuch..."
+                      Start-Sleep -Seconds 10
+                  }
               }
-          } catch {
-              Write-Error "Fehler beim Ausführen von RustDesk --get-id: $($_.Exception.Message)"
+          }
+          
+          # Methode 2: Versuche alternative Parameter
+          if (-not $rustDeskId) {
+              Write-Host "Versuche alternative RustDesk Parameter..."
+              try {
+                  $idOutput = & $rustDeskExePath --version 2>&1
+                  Write-Host "RustDesk Version-Ausgabe: '$idOutput'"
+              } catch {
+                  Write-Warning "Fehler bei --version: $($_.Exception.Message)"
+              }
+              
+              try {
+                  $idOutput = & $rustDeskExePath --help 2>&1
+                  Write-Host "RustDesk Help-Ausgabe: '$idOutput'"
+              } catch {
+                  Write-Warning "Fehler bei --help: $($_.Exception.Message)"
+              }
           }
 
-          # Fallback: Versuche, die ID aus der Konfigurationsdatei zu lesen
+          # Fallback: Versuche, die ID aus der Konfigurationsdatei zu lesen oder RustDesk länger laufen zu lassen
           if (-not $rustDeskId) {
-              Write-Host "--- RustDesk ID nicht über --get-id gefunden. Versuche, aus Konfigurationsdateien zu lesen ---"
-              $rustDeskConfigPaths = @(
-                  (Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml"),
-                  (Join-Path -Path "$env:ProgramData" -ChildPath "RustDesk\config\RustDesk.toml")
-              )
+              Write-Host "--- RustDesk ID nicht über --get-id gefunden. Versuche erweiterte Methoden ---"
+              
+              # Längere Wartezeit geben
+              Write-Host "RustDesk läuft möglicherweise noch nicht vollständig. Warte weitere 30 Sekunden..."
+              Start-Sleep -Seconds 30
+              
+              # Nochmaliger Versuch mit --get-id
+              Write-Host "Finaler Versuch mit --get-id nach längerer Wartezeit..."
+              try {
+                  $idOutput = & $rustDeskExePath --get-id 2>&1
+                  Write-Host "Finale --get-id Ausgabe: '$idOutput'"
+                  
+                  if ($idOutput -match "(\d{9})") {
+                      $rustDeskId = $Matches[1]
+                      Write-Host "RustDesk ID erfolgreich nach längerer Wartezeit gefunden: $rustDeskId"
+                  }
+              } catch {
+                  Write-Warning "Finaler --get-id Versuch fehlgeschlagen: $($_.Exception.Message)"
+              }
+              
+              # Konfigurationsdateien prüfen
+              if (-not $rustDeskId) {
+                  Write-Host "Suche in Konfigurationsdateien..."
+                  $rustDeskConfigPaths = @(
+                      (Join-Path -Path "$env:APPDATA" -ChildPath "RustDesk\config\RustDesk.toml"),
+                      (Join-Path -Path "$env:ProgramData" -ChildPath "RustDesk\config\RustDesk.toml"),
+                      (Join-Path -Path "$env:USERPROFILE" -ChildPath ".config\rustdesk\RustDesk.toml"),
+                      (Join-Path -Path (Split-Path $rustDeskExePath -Parent) -ChildPath "RustDesk.toml")
+                  )
 
-              foreach ($configPath in $rustDeskConfigPaths) {
-                  if (Test-Path $configPath) {
-                      Write-Host "Prüfe Konfigurationsdatei: $configPath"
-                      try {
-                          $configContent = Get-Content -Path $configPath -Raw
-                          if ($configContent -match "client_id\s*=\s*[`"']?(\d{9})[`"']?") {
-                              $rustDeskId = $Matches[1]
-                              Write-Host "RustDesk ID in Konfigurationsdatei gefunden: $configPath - ID: $rustDeskId"
-                              break
-                          } else {
-                              Write-Warning "RustDesk ID (client_id = 9 Ziffern) nicht in Konfigurationsdatei gefunden: $configPath"
+                  foreach ($configPath in $rustDeskConfigPaths) {
+                      Write-Host "Prüfe Pfad: $configPath"
+                      if (Test-Path $configPath) {
+                          Write-Host "Konfigurationsdatei gefunden: $configPath"
+                          try {
+                              $configContent = Get-Content -Path $configPath -Raw -ErrorAction Stop
+                              Write-Host "Dateiinhalt (erste 500 Zeichen): $($configContent.Substring(0, [Math]::Min(500, $configContent.Length)))"
+                              
+                              # Verschiedene Regex-Patterns versuchen
+                              $patterns = @(
+                                  "client_id\s*=\s*[`"']?(\d{9})[`"']?",
+                                  "id\s*=\s*[`"']?(\d{9})[`"']?",
+                                  "[`"'](\d{9})[`"']"
+                              )
+                              
+                              foreach ($pattern in $patterns) {
+                                  if ($configContent -match $pattern) {
+                                      $rustDeskId = $Matches[1]
+                                      Write-Host "RustDesk ID mit Pattern '$pattern' gefunden: $rustDeskId"
+                                      break
+                                  }
+                              }
+                              
+                              if ($rustDeskId) { break }
+                          } catch {
+                              Write-Error "Fehler beim Lesen der Konfigurationsdatei $configPath : $($_.Exception.Message)"
                           }
-                      } catch {
-                          Write-Error "Fehler beim Lesen der Konfigurationsdatei $configPath : $($_.Exception.Message)"
                       }
-                  } else {
-                      Write-Warning "RustDesk-Konfigurationsdatei nicht gefunden unter $configPath"
+                  }
+              }
+              
+              # Registry prüfen (falls RustDesk dort Informationen speichert)
+              if (-not $rustDeskId) {
+                  Write-Host "Suche in Windows Registry..."
+                  try {
+                      $regPaths = @(
+                          "HKCU:\Software\RustDesk",
+                          "HKLM:\Software\RustDesk"
+                      )
+                      
+                      foreach ($regPath in $regPaths) {
+                          if (Test-Path $regPath) {
+                              Write-Host "Registry-Pfad gefunden: $regPath"
+                              $regItems = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+                              if ($regItems) {
+                                  Write-Host "Registry-Inhalte: $($regItems | Out-String)"
+                                  # Suche nach ID in Registry-Werten
+                                  foreach ($property in $regItems.PSObject.Properties) {
+                                      if ($property.Value -match "(\d{9})") {
+                                          $rustDeskId = $Matches[1]
+                                          Write-Host "RustDesk ID in Registry gefunden: $rustDeskId"
+                                          break
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  } catch {
+                      Write-Warning "Fehler beim Registry-Zugriff: $($_.Exception.Message)"
                   }
               }
           }
