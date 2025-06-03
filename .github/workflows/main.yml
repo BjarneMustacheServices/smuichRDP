@@ -1,12 +1,6 @@
 name: Windows - RustDesk Remote Access
 on:
   workflow_dispatch:
-    inputs:
-      duration_minutes:
-        description: 'Dauer, um den Runner aktiv zu halten (in Minuten, max. 360)'
-        required: false
-        default: '60' # Standardmäßig 60 Minuten (1 Stunde)
-
 jobs:
   remote_access:
     name: RustDesk für Remote-Zugriff einrichten
@@ -32,13 +26,24 @@ jobs:
           # Step 2: Install RustDesk silently
           Write-Host "Installing RustDesk silently. This may take a moment..."
           # Use --silent-install for unattended installation.
-          $installProcess = Start-Process -FilePath "$env:TEMP\RustDesk.exe" -ArgumentList "--silent-install" -Wait -NoNewWindow -PassThru -ErrorAction Stop
+          # Add a timeout for the installation process to prevent indefinite hanging.
+          $installProcess = Start-Process -FilePath "$env:TEMP\RustDesk.exe" -ArgumentList "--silent-install" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
 
-          if ($installProcess.ExitCode -ne 0) {
-              Write-Error "RustDesk installation failed with Exit Code: $($installProcess.ExitCode)"
-              echo "rustdesk_id=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
-              echo "rustdesk_password=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
-              exit 1 # Terminate job if installation fails
+          # Check if the process completed within the timeout
+          if ($installProcess.HasExited) {
+              if ($installProcess.ExitCode -ne 0) {
+                  Write-Error "RustDesk installation failed with Exit Code: $($installProcess.ExitCode)"
+                  echo "rustdesk_id=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
+                  echo "rustdesk_password=INSTALLATION_FAILED" >> $GITHUB_OUTPUT
+                  exit 1 # Terminate job if installation fails
+              }
+          } else {
+              # If process did not exit, it timed out or is still running
+              Write-Error "RustDesk installation process timed out or is hanging after 5 minutes. Attempting to terminate."
+              $installProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+              echo "rustdesk_id=INSTALLATION_TIMEOUT" >> $GITHUB_OUTPUT
+              echo "rustdesk_password=INSTALLATION_TIMEOUT" >> $GITHUB_OUTPUT
+              exit 1
           }
           Write-Host "RustDesk installation completed successfully."
 
@@ -53,6 +58,11 @@ jobs:
           }
           Write-Host "RustDesk.exe found at $rustDeskExePath."
 
+          # Step 2.5: Ensure no RustDesk processes are running from the installer
+          Write-Host "Ensuring all RustDesk processes are stopped before proceeding..."
+          Get-Process -Name "rustdesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5 # Give processes a moment to terminate
+
           # Step 3: Wait for RustDesk service to initialize and generate ID
           Write-Host "Waiting for RustDesk service to initialize and generate ID (approx. 30 seconds)..."
           Start-Sleep -Seconds 30
@@ -62,34 +72,41 @@ jobs:
           # For installed versions, it might be in %ProgramFiles%\RustDesk\config\RustDesk.toml or a service profile.
           # The --get-id command line parameter is the most reliable way if it works.
           $rustDeskId = $null
-          Write-Host "Attempting to retrieve RustDesk ID using --get-id command..."
-          try {
-              # Some sources suggest --get-id only works after GUI has run once.
-              # We'll try running the GUI briefly in the background first, then try --get-id.
-              # Use -ErrorAction SilentlyContinue for the background process to avoid stopping the script
-              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 10 # Give it time to generate ID if it needs GUI interaction
+          Write-Host "--- Attempting to retrieve RustDesk ID ---"
 
+          # First, try running the GUI briefly in the background to ensure ID generation
+          Write-Host "Attempting to briefly run RustDesk GUI in background to ensure ID generation (10s sleep)..."
+          try {
+              Start-Process -FilePath $rustDeskExePath -ArgumentList "--no-daemon" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 10
+              Write-Host "Background GUI process started and waited."
+          } catch {
+              Write-Warning "Could not start RustDesk GUI in background: $($_.Exception.Message)"
+          }
+
+          # Then, try retrieving ID using --get-id command
+          Write-Host "Attempting to retrieve RustDesk ID using '$rustDeskExePath --get-id' command..."
+          try {
               $idProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList "--get-id" -PassThru -NoNewWindow -RedirectStandardOutput -RedirectStandardError
               $idProcess.WaitForExit(15000) # Wait up to 15 seconds for ID retrieval
 
               if ($idProcess.HasExited) {
                   $idOutput = $idProcess.StandardOutput.ReadToEnd().Trim()
                   $idError = $idProcess.StandardError.ReadToEnd().Trim()
-                  Write-Host "RustDesk --get-id Exit Code: $($idProcess.ExitCode)"
-                  if ($idOutput) { Write-Host "RustDesk --get-id Output: '$idOutput'" } # Added quotes to see exact output
-                  if ($idError) { Write-Error "RustDesk --get-id Error: '$idError'" } # Added quotes
+                  Write-Host "Command '$rustDeskExePath --get-id' exited with code: $($idProcess.ExitCode)"
+                  Write-Host "Standard Output (STDOUT): '$idOutput'" # Added quotes to see exact output
+                  if ($idError) { Write-Error "Standard Error (STDERR): '$idError'" } # Added quotes
 
                   # RustDesk --get-id outputs just the ID, sometimes with a newline.
                   # Make regex more flexible to find 9 digits anywhere.
                   if ($idOutput -match "(\d{9})") {
                       $rustDeskId = $Matches[1]
-                      Write-Host "RustDesk ID found via --get-id: $rustDeskId"
+                      Write-Host "RustDesk ID successfully found via --get-id: $rustDeskId"
                   } else {
-                      Write-Warning "RustDesk --get-id returned no 9-digit ID in output: '$idOutput'. Trying to read from config file."
+                      Write-Warning "No 9-digit ID found in --get-id output. Output was: '$idOutput'. Trying to read from config file next."
                   }
               } else {
-                  Write-Error "RustDesk --get-id process timed out."
+                  Write-Error "RustDesk --get-id process timed out after 15 seconds."
               }
           } catch {
               Write-Error "Error executing RustDesk --get-id: $($_.Exception.Message)"
@@ -97,7 +114,7 @@ jobs:
 
           # Fallback: Try to read ID from config file if --get-id failed or returned unexpected output
           if (-not $rustDeskId) {
-              Write-Host "Attempting to read RustDesk ID from config file..."
+              Write-Host "--- RustDesk ID not found via --get-id. Attempting to read from config files ---"
               # Prioritize %ProgramData% path for system-wide installs, then %APPDATA%
               $rustDeskConfigPaths = @(
                   (Join-Path -Path "$env:ProgramData" -ChildPath "RustDesk\config\RustDesk.toml"),
@@ -106,21 +123,27 @@ jobs:
 
               foreach ($configPath in $rustDeskConfigPaths) {
                   if (Test-Path $configPath) {
-                      Write-Host "Reading RustDesk ID from: $configPath"
+                      Write-Host "Checking config file: $configPath"
                       # The ID is typically in the [options] section, e.g., "client_id = 123456789"
-                      $configContent = Get-Content -Path $configPath | Out-String
-                      if ($configContent -match "client_id\s*=\s*(\d{9})") {
-                          $rustDeskId = $Matches[1]
-                          Write-Host "RustDesk ID found in config file: $rustDeskId"
-                          break # Exit loop once ID is found
-                      } else {
-                          Write-Warning "RustDesk ID not found in config file: $configPath"
+                      try {
+                          $configContent = Get-Content -Path $configPath | Out-String
+                          # Write-Host "Content of $configPath (partial): $($configContent.Substring(0, [System.Math]::Min(500, $configContent.Length)))" # Log partial content for debug
+                          if ($configContent -match "client_id\s*=\s*(\d{9})") {
+                              $rustDeskId = $Matches[1]
+                              Write-Host "RustDesk ID found in config file: $configPath - ID: $rustDeskId"
+                              break # Exit loop once ID is found
+                          } else {
+                              Write-Warning "RustDesk ID (client_id = 9 digits) not found in config file: $configPath"
+                          }
+                      } catch {
+                          Write-Error "Error reading config file $configPath: $($_.Exception.Message)"
                       }
                   } else {
                       Write-Warning "RustDesk config file not found at $configPath."
                   }
               }
           }
+          Write-Host "--- Finished attempting to retrieve RustDesk ID ---"
 
           # Step 5: Output RustDesk ID to GitHub Actions Workflow Output
           if ($rustDeskId) {
