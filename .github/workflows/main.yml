@@ -6,7 +6,6 @@ jobs:
   rustdesk_id_retrieval:
     name: RustDesk Setup and ID Retrieval
     runs-on: windows-latest
-    timeout-minutes: 400
 
     steps:
       - name: Setup Environment
@@ -204,7 +203,6 @@ jobs:
           $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
           $workDir = "$env:TEMP\rustdesk_setup"
           $rustDeskId = $null
-          $rustDeskPassword = $null
           
           Write-Host "=== Starting RustDesk ID retrieval ==="
           
@@ -344,90 +342,58 @@ jobs:
               Write-Host "Generated test ID: $rustDeskId"
           }
           
-          # Password retrieval from config files
-          Write-Host "=== Retrieving RustDesk password ==="
-          $passwordPatterns = @(
-              'password\s*=\s*"([^"]+)"',
-              "password\s*=\s*'([^']+)'",
-              'password\s*=\s*(\S+)',
-              'passwd\s*=\s*"([^"]+)"',
-              "passwd\s*=\s*'([^']+)'",
-              'passwd\s*=\s*(\S+)',
-              'temp-password\s*=\s*"([^"]+)"',
-              "temp-password\s*=\s*'([^']+)'",
-              'temp-password\s*=\s*(\S+)'
-          )
-          
-          $configPaths = @(
-              "$env:APPDATA\RustDesk\config\RustDesk.toml",
-              "$env:APPDATA\RustDesk\config\RustDesk2.toml", 
-              "$env:ProgramData\RustDesk\config\RustDesk.toml",
-              "$env:USERPROFILE\.config\rustdesk\RustDesk.toml",
-              "$workDir\config\RustDesk.toml",
-              "$(Split-Path $rustDeskExePath -Parent)\RustDesk.toml"
-          )
-          
-          foreach ($configPath in $configPaths) {
-              if (Test-Path $configPath) {
-                  try {
-                      $configContent = Get-Content $configPath -Raw -ErrorAction Stop
-                      foreach ($pattern in $passwordPatterns) {
-                          if ($configContent -match $pattern) {
-                              $rustDeskPassword = $Matches[1]
-                              Write-Host "Password found in $configPath using pattern: $pattern"
-                              break
-                          }
-                      }
-                      if ($rustDeskPassword) { break }
-                  } catch {
-                      Write-Warning "Error reading config file $configPath : $($_.Exception.Message)"
-                  }
-              }
-          }
-          
-          if (-not $rustDeskPassword) {
-              Write-Host "No password found in configuration files"
-          }
-          
           Write-Host "=== RustDesk ID retrieval completed ==="
           Write-Host "Final RustDesk ID: $rustDeskId"
-          Write-Host "Password status: $(if ($rustDeskPassword) { "Found" } else { "Not found" })"
           
-          # Output the ID and password
+          # Output the ID
           "rustdesk_id=$rustDeskId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          if ($rustDeskPassword) {
-              "rustdesk_password=$rustDeskPassword" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          }
           
           # Clean up processes
           Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Set RustDesk Password
+        if: steps.download_rustdesk_step.outputs.download_success == 'true'
+        run: |
+          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
+          $workDir = "$env:TEMP\rustdesk_setup"
+          
+          Write-Host "=== Setting RustDesk Password ==="
+          
+          # Always set password to "Github workflow!"
+          try {
+              Write-Host "Setting RustDesk password to 'Github workflow!'"
+              
+              # Kill any existing RustDesk processes to ensure password change applies
+              Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+              
+              # Set the password
+              $passwordSetResult = & $rustDeskExePath --password "Github workflow!" 2>&1
+              Write-Host "Password set result: $passwordSetResult"
+              
+              # Verify password was set
+              $passwordCheck = & $rustDeskExePath --get-password 2>&1
+              if ($passwordCheck -match "Github workflow!") {
+                  Write-Host "Password successfully set to 'Github workflow!'"
+              } else {
+                  Write-Warning "Password verification failed. Output was: $passwordCheck"
+              }
+          } catch {
+              Write-Warning "Could not set password: $($_.Exception.Message)"
+          }
+          
+          Write-Host "================================="
 
       - name: Display Connection Information
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
           $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
-          $rustDeskPassword = "${{ steps.get_rustdesk_id.outputs.rustdesk_password }}"
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          
-          # Set password if not found in config
-          if (-not $rustDeskPassword -or $rustDeskPassword -eq '') {
-              try {
-                  Write-Host "Setting RustDesk password to 'Github workflow!'"
-                  & $rustDeskExePath --password "Github workflow!" 2>&1
-                  $rustDeskPassword = "Github workflow!"
-              } catch {
-                  Write-Warning "Could not set password: $($_.Exception.Message)"
-                  $rustDeskPassword = "None set! Use the '--password' option to set it."
-              }
-          } else {
-              Write-Host "Using existing password from config"
-          }
           
           Write-Host "=========================================="
           Write-Host "        RUSTDESK CONNECTION INFO"
           Write-Host "=========================================="
           Write-Host "RustDesk ID: $rustDeskId"
-          Write-Host "Password: $rustDeskPassword"
+          Write-Host "Password: Github workflow!"
           Write-Host "Runner OS: Windows Server 2022"
           Write-Host "Runner IP: $(Invoke-RestMethod -Uri 'https://ipinfo.io/ip' -ErrorAction SilentlyContinue)"
           Write-Host "=========================================="
@@ -459,18 +425,12 @@ jobs:
           
           $durationSeconds = $durationMinutes * 60
           $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
-          $rustDeskPassword = "${{ steps.get_rustdesk_id.outputs.rustdesk_password }}"
-          
-          # Handle case where password wasn't found and was set in previous step
-          if (-not $rustDeskPassword -or $rustDeskPassword -eq '') {
-              $rustDeskPassword = "Github workflow!"
-          }
           
           Write-Host "=========================================="
           Write-Host "Runner will stay active for $durationMinutes minutes"
           Write-Host "RustDesk ID: $rustDeskId"
           Write-Host "Connect using RustDesk client with ID: $rustDeskId"
-          Write-Host "Password: $rustDeskPassword"
+          Write-Host "Password: Github workflow!"
           Write-Host "=========================================="
           
           # Start RustDesk one more time to ensure it's running
