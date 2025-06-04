@@ -1,6 +1,12 @@
 name: Windows - RustDesk ID Retrieval (Password Fixed)
 on:
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Duration to keep runner active (minutes)'
+        required: false
+        default: '60'
+        type: number
 
 jobs:
   rustdesk_id_retrieval:
