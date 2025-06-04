@@ -6,7 +6,6 @@ on:
         description: 'Duration to keep runner active (minutes)'
         required: false
         default: '60'
-        type: number
 
 jobs:
   rustdesk_id_retrieval:
