@@ -1,4 +1,4 @@
-name: Windows - RustDesk ID Retrieval (Fixed)
+name: Windows - RustDesk ID Retrieval (Password Fixed)
 on:
   workflow_dispatch:
 
@@ -135,66 +135,193 @@ jobs:
               Write-Warning "Error testing RustDesk executable: $($_.Exception.Message)"
           }
 
-      - name: Start RustDesk Service
+      - name: Initial RustDesk Start and Service Installation
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
           $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
           $workDir = "$env:TEMP\rustdesk_setup"
           
-          Write-Host "Starting RustDesk service..."
+          Write-Host "=== Initial RustDesk Setup ==="
           
           # Kill any existing RustDesk processes
           Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 3
           
           try {
-              # Try to install/start RustDesk service
-              Write-Host "Attempting to start RustDesk service..."
+              # Try to install RustDesk service first
+              Write-Host "Installing RustDesk service..."
+              $installResult = & $rustDeskExePath --install-service 2>&1
+              Write-Host "Service install result: $installResult"
+              Start-Sleep -Seconds 5
               
-              # Method 1: Try to start as service
-              $serviceArgs = @("--service")
-              $serviceProcess = Start-Process -FilePath $rustDeskExePath -ArgumentList $serviceArgs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+              # Try to start the service
+              Write-Host "Starting RustDesk service..."
+              $serviceStartResult = & $rustDeskExePath --service 2>&1
+              Write-Host "Service start result: $serviceStartResult"
+              Start-Sleep -Seconds 10
               
-              if ($serviceProcess) {
-                  Write-Host "RustDesk service process started (PID: $($serviceProcess.Id))"
-                  Start-Sleep -Seconds 15
-                  
-                  if (-not $serviceProcess.HasExited) {
-                      Write-Host "RustDesk service is running"
-                  } else {
-                      Write-Host "RustDesk service process exited with code: $($serviceProcess.ExitCode)"
+              # Check if service is running
+              $rustdeskService = Get-Service -Name "*rustdesk*" -ErrorAction SilentlyContinue
+              if ($rustdeskService) {
+                  Write-Host "RustDesk service found: $($rustdeskService.Name) - Status: $($rustdeskService.Status)"
+                  if ($rustdeskService.Status -ne "Running") {
+                      try {
+                          Start-Service $rustdeskService.Name -ErrorAction Stop
+                          Write-Host "Service started successfully"
+                      } catch {
+                          Write-Warning "Could not start service: $($_.Exception.Message)"
+                      }
                   }
-              }
-              
-              # Method 2: Try to start normally and let it create ID
-              Write-Host "Starting RustDesk in normal mode..."
-              $normalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              
-              if ($normalProcess) {
-                  Write-Host "RustDesk normal process started (PID: $($normalProcess.Id))"
-                  Start-Sleep -Seconds 20
-                  
-                  if (-not $normalProcess.HasExited) {
-                      Write-Host "RustDesk normal process is running"
-                  } else {
-                      Write-Host "RustDesk normal process exited with code: $($normalProcess.ExitCode)"
-                  }
+              } else {
+                  Write-Warning "RustDesk service not found"
               }
               
           } catch {
-              Write-Warning "Error starting RustDesk: $($_.Exception.Message)"
+              Write-Warning "Error with service installation: $($_.Exception.Message)"
           }
           
-          # Check what RustDesk processes are running
-          $rustdeskProcesses = Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue
-          if ($rustdeskProcesses) {
-              Write-Host "Running RustDesk processes:"
-              foreach ($proc in $rustdeskProcesses) {
-                  Write-Host "  PID: $($proc.Id), Name: $($proc.ProcessName), CPU: $($proc.CPU)"
+          # Start RustDesk in normal mode as backup
+          Write-Host "Starting RustDesk in normal mode..."
+          try {
+              $normalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+              if ($normalProcess) {
+                  Write-Host "RustDesk normal process started (PID: $($normalProcess.Id))"
+                  Start-Sleep -Seconds 15
               }
-          } else {
-              Write-Warning "No RustDesk processes are currently running"
+          } catch {
+              Write-Warning "Error starting normal RustDesk: $($_.Exception.Message)"
           }
+
+      - name: Set RustDesk Password (Multiple Methods)
+        if: steps.download_rustdesk_step.outputs.download_success == 'true'
+        run: |
+          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
+          $password = "GithubActions2024!"
+          
+          Write-Host "=== Setting RustDesk Password (Multiple Methods) ==="
+          Write-Host "Target password: $password"
+          
+          # Method 1: Direct password command
+          Write-Host "Method 1: Direct password command"
+          try {
+              $passwordResult1 = & $rustDeskExePath --password $password 2>&1
+              Write-Host "Password command result: $passwordResult1"
+              Start-Sleep -Seconds 3
+          } catch {
+              Write-Warning "Method 1 failed: $($_.Exception.Message)"
+          }
+          
+          # Method 2: Using config command
+          Write-Host "Method 2: Using config command"
+          try {
+              $configResult = & $rustDeskExePath --config set password $password 2>&1
+              Write-Host "Config command result: $configResult"
+              Start-Sleep -Seconds 3
+          } catch {
+              Write-Warning "Method 2 failed: $($_.Exception.Message)"
+          }
+          
+          # Method 3: Direct config file manipulation
+          Write-Host "Method 3: Direct config file manipulation"
+          $configPaths = @(
+              "$env:APPDATA\RustDesk\config\RustDesk.toml",
+              "$env:APPDATA\RustDesk\config\RustDesk2.toml", 
+              "$env:ProgramData\RustDesk\config\RustDesk.toml"
+          )
+          
+          foreach ($configPath in $configPaths) {
+              try {
+                  $configDir = Split-Path $configPath -Parent
+                  if (-not (Test-Path $configDir)) {
+                      New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+                  }
+                  
+                  # Create or update config file
+                  $configContent = @"
+[options]
+password = "$password"
+allow-remote-config-modification = true
+enable-file-transfer = true
+enable-clipboard = true
+
+[network]
+"@
+                  $configContent | Out-File -FilePath $configPath -Encoding UTF8 -Force
+                  Write-Host "Config file created/updated: $configPath"
+                  
+                  # Verify config file content
+                  if (Test-Path $configPath) {
+                      $verifyContent = Get-Content $configPath -Raw
+                      Write-Host "Config file content: $verifyContent"
+                  }
+              } catch {
+                  Write-Warning "Could not create config at $configPath : $($_.Exception.Message)"
+              }
+          }
+          
+          # Method 4: Registry approach (for some RustDesk versions)
+          Write-Host "Method 4: Registry approach"
+          try {
+              $regPaths = @(
+                  "HKCU:\Software\RustDesk",
+                  "HKLM:\Software\RustDesk"
+              )
+              
+              foreach ($regPath in $regPaths) {
+                  try {
+                      if (-not (Test-Path $regPath)) {
+                          New-Item -Path $regPath -Force | Out-Null
+                      }
+                      Set-ItemProperty -Path $regPath -Name "password" -Value $password -Force
+                      Write-Host "Registry key set: $regPath"
+                  } catch {
+                      Write-Warning "Could not set registry at $regPath : $($_.Exception.Message)"
+                  }
+              }
+          } catch {
+              Write-Warning "Registry method failed: $($_.Exception.Message)"
+          }
+          
+          # Restart RustDesk to apply password changes
+          Write-Host "Restarting RustDesk to apply password..."
+          Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+          
+          # Start service again
+          try {
+              $rustdeskService = Get-Service -Name "*rustdesk*" -ErrorAction SilentlyContinue
+              if ($rustdeskService) {
+                  Start-Service $rustdeskService.Name -ErrorAction SilentlyContinue
+                  Start-Sleep -Seconds 5
+              }
+          } catch {
+              Write-Warning "Could not restart service: $($_.Exception.Message)"
+          }
+          
+          # Start normal process
+          try {
+              $restartProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+              if ($restartProcess) {
+                  Write-Host "RustDesk restarted (PID: $($restartProcess.Id))"
+                  Start-Sleep -Seconds 10
+              }
+          } catch {
+              Write-Warning "Could not restart RustDesk: $($_.Exception.Message)"
+          }
+          
+          # Verify password
+          Write-Host "Verifying password..."
+          try {
+              $passwordCheck = & $rustDeskExePath --get-password 2>&1
+              Write-Host "Password verification result: $passwordCheck"
+          } catch {
+              Write-Warning "Could not verify password: $($_.Exception.Message)"
+          }
+          
+          # Output password for later use
+          "rustdesk_password=$password" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          
+          Write-Host "=== Password setup completed ==="
 
       - name: Retrieve RustDesk ID
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
@@ -351,51 +478,75 @@ jobs:
           # Clean up processes
           Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-      - name: Set RustDesk Password
+      - name: Final RustDesk Start with Password Confirmation
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
           $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          $workDir = "$env:TEMP\rustdesk_setup"
+          $password = "GithubActions2024!"
           
-          Write-Host "=== Setting RustDesk Password ==="
+          Write-Host "=== Final RustDesk Setup ==="
           
-          # Always set password to "Github workflow!"
+          # One more password attempt before final start
+          Write-Host "Final password configuration..."
           try {
-              Write-Host "Setting RustDesk password to 'Github workflow!'"
-              
-              # Kill any existing RustDesk processes to ensure password change applies
-              Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              & $rustDeskExePath --password $password 2>&1 | Out-Null
               Start-Sleep -Seconds 2
-              
-              # Set the password
-              $passwordSetResult = & $rustDeskExePath --password "Github workflow!" 2>&1
-              Write-Host "Password set result: $passwordSetResult"
-              
-              # Verify password was set
-              $passwordCheck = & $rustDeskExePath --get-password 2>&1
-              if ($passwordCheck -match "Github workflow!") {
-                  Write-Host "Password successfully set to 'Github workflow!'"
-              } else {
-                  Write-Warning "Password verification failed. Output was: $passwordCheck"
-              }
           } catch {
-              Write-Warning "Could not set password: $($_.Exception.Message)"
+              Write-Warning "Final password set failed: $($_.Exception.Message)"
           }
           
-          Write-Host "================================="
+          # Start RustDesk service if available
+          try {
+              $rustdeskService = Get-Service -Name "*rustdesk*" -ErrorAction SilentlyContinue
+              if ($rustdeskService) {
+                  if ($rustdeskService.Status -ne "Running") {
+                      Start-Service $rustdeskService.Name -ErrorAction SilentlyContinue
+                      Write-Host "RustDesk service started"
+                  }
+                  Start-Sleep -Seconds 5
+              }
+          } catch {
+              Write-Warning "Service start failed: $($_.Exception.Message)"
+          }
+          
+          # Start RustDesk in normal mode
+          Write-Host "Starting RustDesk for connections..."
+          try {
+              $finalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+              if ($finalProcess) {
+                  Write-Host "RustDesk started for connections (PID: $($finalProcess.Id))"
+                  Start-Sleep -Seconds 10
+              }
+          } catch {
+              Write-Warning "Could not start RustDesk: $($_.Exception.Message)"
+          }
+          
+          # Check running processes
+          $rustdeskProcesses = Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue
+          if ($rustdeskProcesses) {
+              Write-Host "Running RustDesk processes:"
+              foreach ($proc in $rustdeskProcesses) {
+                  Write-Host "  PID: $($proc.Id), Name: $($proc.ProcessName)"
+              }
+          } else {
+              Write-Warning "No RustDesk processes are currently running"
+          }
 
       - name: Display Connection Information
         if: steps.download_rustdesk_step.outputs.download_success == 'true'
         run: |
           $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
+          $password = "GithubActions2024!"
           
           Write-Host "=========================================="
           Write-Host "        RUSTDESK CONNECTION INFO"
           Write-Host "=========================================="
           Write-Host "RustDesk ID: $rustDeskId"
-          Write-Host "Password: Github workflow!"
+          Write-Host "Password: $password"
           Write-Host "Runner OS: Windows Server 2022"
           Write-Host "Runner IP: $(Invoke-RestMethod -Uri 'https://ipinfo.io/ip' -ErrorAction SilentlyContinue)"
+          Write-Host "=========================================="
+          Write-Host "WICHTIG: Verwende genau dieses Passwort: $password"
           Write-Host "=========================================="
 
       - name: Keep Runner Active
@@ -425,32 +576,40 @@ jobs:
           
           $durationSeconds = $durationMinutes * 60
           $rustDeskId = "${{ steps.get_rustdesk_id.outputs.rustdesk_id }}"
+          $password = "GithubActions2024!"
           
           Write-Host "=========================================="
           Write-Host "Runner will stay active for $durationMinutes minutes"
           Write-Host "RustDesk ID: $rustDeskId"
+          Write-Host "Password: $password"
           Write-Host "Connect using RustDesk client with ID: $rustDeskId"
-          Write-Host "Password: Github workflow!"
           Write-Host "=========================================="
           
-          # Start RustDesk one more time to ensure it's running
-          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
-          try {
-              $finalProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-              Write-Host "RustDesk started for connection (PID: $($finalProcess.Id))"
-          } catch {
-              Write-Warning "Could not start final RustDesk process: $($_.Exception.Message)"
-          }
-          
-          # Keep alive loop with progress updates
+          # Keep alive loop with progress updates and RustDesk monitoring
           $endTime = (Get-Date).AddSeconds($durationSeconds)
           $progressInterval = [Math]::Max(60, $durationSeconds / 20)  # Update every minute or 5% of duration
           $nextProgressUpdate = (Get-Date).AddSeconds($progressInterval)
+          $rustDeskExePath = "${{ steps.download_rustdesk_step.outputs.rustdesk_exe_path }}"
           
           while ((Get-Date) -lt $endTime) {
+              # Check if RustDesk is still running and restart if needed
+              $runningProcesses = Get-Process -Name "rustdesk*" -ErrorAction SilentlyContinue
+              if (-not $runningProcesses) {
+                  Write-Host "RustDesk not running, restarting..."
+                  try {
+                      $restartProcess = Start-Process -FilePath $rustDeskExePath -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                      if ($restartProcess) {
+                          Write-Host "RustDesk restarted (PID: $($restartProcess.Id))"
+                      }
+                  } catch {
+                      Write-Warning "Could not restart RustDesk: $($_.Exception.Message)"
+                  }
+              }
+              
               if ((Get-Date) -ge $nextProgressUpdate) {
                   $remainingMinutes = [Math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
-                  Write-Host "Runner staying active... $remainingMinutes minutes remaining. RustDesk ID: $rustDeskId"
+                  Write-Host "Runner staying active... $remainingMinutes minutes remaining."
+                  Write-Host "RustDesk ID: $rustDeskId | Password: $password"
                   $nextProgressUpdate = (Get-Date).AddSeconds($progressInterval)
               }
               Start-Sleep -Seconds 30
